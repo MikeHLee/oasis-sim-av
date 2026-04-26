@@ -21,4 +21,6 @@ venv/
 runs/
 *.ply
 *.png
+*.gif
 !docs/**/*.png
+!docs/**/*.gif

@@ -53,22 +53,51 @@ python -m oasis_sim_av.viz runs/<timestamp> --frame 0
 
 ## Annotated video + fusion filter
 
-After a run you can:
+After a run you can stitch the PNG frames into an annotated video and run
+the 1D complementary fusion filter over the sensor stream:
 
 ```bash
-# Stitch PNG frames into an annotated mp4 with a per-frame tape-hit HUD:
 oasis-sim-av-render-video runs/<timestamp>/ --fps 10
-#   -> runs/<timestamp>/video.mp4  (or video.gif if ffmpeg is unavailable)
-
-# Run the 1D complementary fusion filter (LiDAR + camera yellow detection):
-oasis-sim-av-fuse runs/<timestamp>/
-#   -> runs/<timestamp>/fusion.jsonl  + fusion.png
+oasis-sim-av-fuse         runs/<timestamp>/
+# -> video.mp4 + video.gif, fusion.jsonl + fusion.png
 ```
 
-The baseline `police_tape_rain.yaml` is tuned so the fused posterior
-`P(tape)` stays below the detection threshold across the full run even
-though both raw sensors produce *some* signal — exactly the "each sensor
-almost-sees it, the filter still can't" breakdown the brief targets.
+### Demo 1 — baseline `police_tape_rain.yaml` (fusion **recovers**)
+
+With light rain (5% LiDAR dropout, 3 cm σ), LiDAR returns on the tape are
+noisy and intermittent but the camera picks up a persistent chromatic
+signal. The complementary filter integrates both into a usable posterior
+that crosses the detection threshold.
+
+![baseline HUD overlay](docs/demo_baseline.gif)
+
+![baseline fusion posterior](docs/demo_baseline_fusion.png)
+
+```text
+$ oasis-sim-av-fuse runs/<stamp>/
+[fusion] n=20  max_p_fused=0.977  frac_detected=0.800
+```
+
+### Demo 2 — stressed `police_tape_heavy_rain.yaml` (fusion **collapses**)
+
+Heavy rain (30% LiDAR dropout, 8 cm σ), tape moved far enough ahead that
+its angular footprint is sub-pixel in the camera, and a thinner, more
+violently fluttering cloth. Both sensors produce only sporadic, weak
+returns; the fused posterior never approaches the threshold:
+
+![heavy rain HUD overlay](docs/demo_heavy_rain.gif)
+
+![heavy rain fusion posterior](docs/demo_heavy_rain_fusion.png)
+
+```text
+$ oasis-sim-av-fuse runs/<stamp>/
+[fusion] n=30  max_p_fused=0.137  frac_detected=0.000
+```
+
+This is the "joint sensor failure" regime the brief targets: each sensor's
+noise floor exceeds its signal, and no linear combination recovers the
+object. It motivates the next round of work (richer priors, temporal
+models like EKFs, or active-sensing strategies).
 
 ## Tests
 

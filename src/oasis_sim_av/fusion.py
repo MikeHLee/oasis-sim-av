@@ -43,11 +43,14 @@ import numpy as np
 # Yellow detection heuristic (no classifier, just a colour box)
 # ---------------------------------------------------------------------------
 # Tape colour as rendered by camera._shade_float is world.tape_color()
-# ~ (0.95, 0.85, 0.15) scaled by shade ∈ [AMBIENT, 1].  We pick a window that
-# includes dimmer tape shade (shade ~ 0.22) → (210, 187, 33) worst case.
-YELLOW_R_MIN = 120
-YELLOW_G_MIN = 90
-YELLOW_B_MAX = 110
+# = (0.95, 0.85, 0.15).  Lambert shade sits in [AMBIENT, 1] = [0.22, 1], so
+# at the worst edge-on pose the rendered tape RGB is ~(53, 47, 8).  That's
+# still unambiguously chromatic (R >> B, R >= G), so we set a generous
+# luminance floor and rely on chromaticity to discriminate.
+YELLOW_R_MIN = 60
+YELLOW_G_MIN = 40
+YELLOW_B_MAX = 60
+YELLOW_CHROMA_MIN = 40   # R - B
 
 
 def yellow_pixel_count(
@@ -76,8 +79,8 @@ def yellow_pixel_count(
         (R >= YELLOW_R_MIN)
         & (G >= YELLOW_G_MIN)
         & (B <= YELLOW_B_MAX)
-        & (R >= G)          # tape has R >= G (yellow, not green)
-        & ((R - B) >= 60)   # chromaticity, rules out sky/grey
+        & (R >= G)                         # yellow, not green
+        & ((R - B) >= YELLOW_CHROMA_MIN)   # chromaticity, rules out grey
     )
     return int(mask.sum())
 

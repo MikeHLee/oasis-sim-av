@@ -1,0 +1,84 @@
+# Police tape in heavy rain — sensor-fusion collapse scenario.
+#
+# Unlike `police_tape_rain.yaml` which still lets a moderately tuned fusion
+# filter recover in most frames, this scenario is tuned so that *both*
+# sensors degrade simultaneously:
+#   - LiDAR: 30% rain dropout, 8 cm σ range noise
+#   - Camera: tape placed >40m ahead so angular footprint is <1 px for most
+#             frames, and vehicle never closes enough for yellow pixels to
+#             exceed the chromaticity floor.
+#   - Tape cloth: heavier wind, thinner cross-section, violent flutter so
+#                 geometric LiDAR hits per scan drop further.
+#
+# Expected outcome: fused posterior stays below the default 0.5 threshold
+# for the full duration.  Demonstrates the "joint degradation" failure mode
+# the brief targets.
+
+seed: 7
+duration_s: 3.0
+dt: 0.01
+
+output:
+  dir: runs
+  frame_every: 10
+  save_png: true
+  save_ply: true
+  save_jsonl: true
+
+world:
+  ground_z: 0.0
+  buildings:
+    - aabb: [-30.0, -20.0, 0.0, -10.0,  -5.0, 22.0]
+    - aabb: [-30.0,   5.0, 0.0, -10.0,  20.0, 24.0]
+    - aabb: [ 40.0, -20.0, 0.0,  60.0,  -5.0, 30.0]  # far buildings frame the scene
+    - aabb: [ 40.0,   5.0, 0.0,  60.0,  20.0, 18.0]
+  roads:
+    - - [-40.0, -5.0]
+      - [ 70.0, -5.0]
+      - [ 70.0,  5.0]
+      - [-40.0,  5.0]
+  tape:
+    # Strung between the far pair of buildings at x~50 — well out ahead
+    # so the camera sees it as a subpixel-ish line.
+    anchor_a: [ 40.0, -5.0, 3.0 ]
+    anchor_b: [ 60.0, -5.0, 3.0 ]
+    length: 20.6
+    width: 0.03
+    n_length: 30
+    n_width: 2
+    mass_per_particle: 0.008
+    spring_k: 400.0
+    spring_damping: 0.5
+    global_damping: 0.02
+    wind_bias:   [0.5, 1.8, 0.3]
+    wind_noise_std: 4.0
+
+vehicle:
+  wheelbase: 2.7
+  initial_x: -30.0
+  initial_y: 0.0
+  initial_theta: 0.0
+  controller:
+    type: constant
+    base_v: 5.0          # slower so we don't blow past the tape in 3s
+    base_delta: 0.0
+
+lidar:
+  offset: [0.0, 0.0, 1.7]
+  elevation_fov_deg: [-10.0, 8.0]
+  elevation_rings: 24     # slightly coarser than baseline
+  azimuth_fov_deg: [-30.0, 30.0]
+  azimuth_rays: 384
+  range_m: 80.0
+  range_noise_std_m: 0.08
+  rain_dropout_prob: 0.30
+
+camera:
+  offset: [1.5, 0.0, 1.4]
+  forward: [1.0, 0.0, 0.0]
+  up: [0.0, 0.0, 1.0]
+  fov_h_deg: 60.0
+  width: 320
+  height: 240
+  motion_blur_samples: 4
+  exposure_s: 0.02
