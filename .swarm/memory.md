@@ -2,6 +2,42 @@
 
 Append-only record of non-obvious decisions. Newest first.
 
+## 2026-04-26 — SIM-003 bezier_pursuit approximation
+
+The `bezier_pursuit` controller uses a **simplified** pure-pursuit: it
+returns `delta = clip(alpha, -max_delta, max_delta)` where `alpha` is the
+heading error to the lookahead point. A physically exact pure-pursuit
+law is `delta = atan(2*L*sin(alpha) / Ld)` with `L` = wheelbase. That
+form requires the controller to know L, which is vehicle state, not
+controller state. Passing L down would tighten coupling between
+`VehicleControllerConfig` and `KinematicBicycle`.
+
+The current form is correct in sign, tracks well at low speeds, and
+respects `bezier_max_delta_rad`. At high speed/low radius you will see
+understeer — the integration test
+`test_bezier_pursuit_runs_on_bicycle` uses 4 m/s and a gentle S-curve to
+stay inside the regime where this approximation holds (error < 6 m from
+target endpoint after 8 s of closed-loop tracking).
+
+Follow-up SIM-003-v2 would thread wheelbase through `make_controller`,
+or alternatively move the pursuit logic onto a closed-loop
+`PathFollower(bike, path)` object that has access to both.
+
+## 2026-04-26 — SIM-004 shadow rays: ambient-only in shadow
+
+The shadow shader reduces shaded-pixel output to `AMBIENT * base_color`
+rather than fully clamping to black. This preserves colour continuity
+across the shadow terminator so the road/ground/building all read as
+the same material in shadowed vs lit regions, which is what we want for
+sensor-domain realism. Tape (cloth) also drops to AMBIENT but keeps its
+yellow colour — important because otherwise the camera's yellow-pixel
+fusion signal would flicker as the tape enters/leaves shadow.
+
+Shadow rays are off by default (`CameraConfig.shadow_rays = False`)
+because they roughly double camera render time (one extra ray per hit
+pixel). `scenarios/curved_road.yaml` sets them on, with
+`motion_blur_samples: 2` (down from the baseline's 4) to offset.
+
 ## 2026-04-26 — SIM-002 complementary-filter design
 
 The "1D complementary filter" in `fusion.py` is, strictly speaking, a

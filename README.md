@@ -99,6 +99,22 @@ noise floor exceeds its signal, and no linear combination recovers the
 object. It motivates the next round of work (richer priors, temporal
 models like EKFs, or active-sensing strategies).
 
+### Demo 3 — curved road + hard shadows (`curved_road.yaml`)
+
+Exercises the two later features in combination:
+
+- `controller.type: bezier_pursuit` — pure-pursuit tracking of a cubic
+  Bezier centerline (SIM-003). The vehicle follows a gentle right bend
+  past flanking buildings, validating the kinematic bicycle on a
+  non-degenerate path.
+- `camera.shadow_rays: true` — a secondary ray per hit toward the
+  directional light, yielding hard cast shadows from buildings onto the
+  road and ground (SIM-004). Doubles the render cost; kept off by
+  default.
+
+![curved road with shadows](docs/demo_curved_road.gif)
+![shadow frame close-up](docs/demo_curved_road_shadow_frame.png)
+
 ## Tests
 
 ```bash

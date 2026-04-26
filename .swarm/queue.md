@@ -18,15 +18,18 @@ Format: `- [ ] [ID] [STATE] description` where STATE ∈ `OPEN` / `CLAIMED` / `D
       notes: entry point `oasis-sim-av-fuse`. Yellow-box heuristic as the
       camera sensor. Baseline scenario produces max_p_fused < 0.5 (threshold).
 
-- [ ] [SIM-003] [OPEN] Swap the straight-line road grid for a single curved
+- [ ] [SIM-003] [DONE 2026-04-26] Swap the straight-line road grid for a single curved
       lane defined by a Bezier centerline. Validates the bicycle model on a
       non-degenerate path.
       priority: low
+      notes: Implemented as `bezier_pursuit` controller type (pure-pursuit
+      on de-Casteljau-sampled cubic). Demo: `scenarios/curved_road.yaml`.
 
-- [ ] [SIM-004] [OPEN] Add shadow rays for the directional light. Currently
+- [ ] [SIM-004] [DONE 2026-04-26] Add shadow rays for the directional light. Currently
       the shading is ambient + Lambert with no occlusion, so tape doesn't cast
       shadow on the road. Low visual value, medium physical-realism value.
       priority: low
+      notes: `camera.shadow_rays: true` flag. ~2x render cost, default off.
 
 - [ ] [SIM-005] [OPEN] BVH / uniform grid over the AABB scene to drop
       per-ray-per-box cost from O(N*M) to O(N*log M). Worth it once the
@@ -39,6 +42,8 @@ Format: `- [ ] [ID] [STATE] description` where STATE ∈ `OPEN` / `CLAIMED` / `D
 
 ## Done
 
+- [x] [SIM-004] [DONE 2026-04-26] Shadow rays (`camera.shadow_rays`).
+- [x] [SIM-003] [DONE 2026-04-26] Bezier-pursuit controller (`vehicle.py`).
 - [x] [SIM-002] [DONE 2026-04-26] Complementary-filter fusion (`fusion.py`).
 - [x] [SIM-001] [DONE 2026-04-26] Video rendering CLI (`render_video.py`).
 - [x] [SIM-000] [DONE 2026-04-26] Initial scaffold: geometry / cloth /

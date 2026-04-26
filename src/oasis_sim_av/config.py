@@ -42,7 +42,9 @@ class WorldConfig:
 
 @dataclass
 class VehicleControllerConfig:
-    type: Literal["constant", "step", "ramp", "sine", "impulse_steer"] = "impulse_steer"
+    type: Literal[
+        "constant", "step", "ramp", "sine", "impulse_steer", "bezier_pursuit"
+    ] = "impulse_steer"
     base_v: float = 10.0
     base_delta: float = 0.0
     step_time: float = 0.0
@@ -53,6 +55,12 @@ class VehicleControllerConfig:
     impulse_time: float = 3.0
     impulse_delta: float = 0.2
     impulse_duration: float = 0.3
+    # bezier_pursuit: tracks a cubic Bezier centerline via pure-pursuit
+    bezier_control_points: list[list[float]] = field(
+        default_factory=lambda: [[0.0, 0.0], [20.0, 0.0], [40.0, 10.0], [60.0, 10.0]]
+    )
+    bezier_lookahead_m: float = 5.0
+    bezier_max_delta_rad: float = 0.5
 
 
 @dataclass
@@ -86,6 +94,7 @@ class CameraConfig:
     height: int = 240
     motion_blur_samples: int = 4
     exposure_s: float = 0.01
+    shadow_rays: bool = False   # SIM-004: cast secondary rays for hard shadows
 
 
 @dataclass
