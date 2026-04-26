@@ -2,6 +2,90 @@
 
 Append-only record of non-obvious decisions. Newest first.
 
+## 2026-04-26 — SIM-007/008/009 multi-view demo spec (frozen, not yet implemented)
+
+User requested that the existing single-panel demo GIFs be replaced
+with a multi-modal sensor-fusion visualisation. Full spec lives in
+`queue.md` SIM-007/008/009; this entry records the non-obvious design
+decisions made during the pre-coding conversation so the next agent
+does not need to re-litigate them.
+
+### Decision 1 — Layout is 5×2, NOT 5×3
+User initially asked for "5×3 square grid". I pushed back: we only
+have 4-5 genuinely distinct modalities (camera, LiDAR, detections,
+fused, posterior/HUD) and two perspectives (vehicle-forward, world
+BEV) that make sense. A 5×3 = 15-panel grid would force redundancy.
+User agreed to 5×2: top row = vehicle camera views, bottom row = BEV.
+
+### Decision 2 — BEV is world-fixed orthographic, per-scenario anchored
+Not a chase camera, not a vehicle-following BEV. The camera is anchored
+at a fixed world position per scenario (via `bev.center` + `extent_m`
+in YAML) pointed at the decision intersection — the place where the
+vehicle either continues through the tape or turns. This is the most
+information-dense framing for "sensor fusion failed at this specific
+moment"; a chase camera would keep the vehicle centred and lose the
+fixed spatial reference. BEV re-uses the existing ray tracer with
+orthographic primary rays (all rays parallel, pointing down), so no
+new intersection code.
+
+### Decision 3 — Detector is an oracle with CONDITION-DEPENDENT noise
+User chose "oracle projection with noise" over colour-threshold or
+scipy.ndimage.label. I flagged a risk: a naive oracle always produces
+correct bboxes, which would make the detections panel look healthy
+while the real camera is blind (sub-pixel tape, heavy rain). That
+would be misleading — the whole point of the demo is that the camera
+sees less than it should.
+
+Resolution: noise is NOT iid Gaussian. It depends on the same physical
+conditions that degrade the camera:
+  - jitter ∝ range + bbox_width  (far, small tape → wiggly boxes)
+  - score ∝ f(rain_dropout, cloth_velocity, range)
+  - detection drop probability = (1 - score) * 0.5
+
+This makes the oracle degrade in lockstep with what the camera would
+"really" struggle with, without implementing a learned detector. It's
+a deliberate stand-in. The docstring and README must call this out —
+do not describe this as "object detection" full stop; it is
+"condition-modulated projection."
+
+### Decision 4 — Rain clutter is VISUAL-ONLY, clean scans untouched
+User chose advected droplet field over uncorrelated short-range returns
+or camera-only streaks. I flagged that integrating rain into the scan
+stream would:
+  (a) break test_baseline_tape_stays_below_threshold's tuning,
+  (b) change the published max_p_fused numbers in the README,
+  (c) require re-tuning FusionConfig defaults.
+
+Resolution: two scan objects per sensor fire:
+  - `scan_clean`  → fusion.py input, written to .ply, used by tests.
+  - `scan_with_clutter` → ONLY used by the BEV / fused panels in the
+                          renderer. Never persisted, never fed to
+                          fusion.
+Clean scans stay bit-identical to pre-SIM-009 output. Rain points tagged
+`kind=3` so the BEV rasteriser can colour them cyan without touching
+existing kind-0/1/2 code paths.
+
+### Decision 5 — Advected droplets, not uncorrelated returns
+User chose the more realistic option (advected field over uncorrelated
+spawns). This costs ~20-30% extra per sensor fire at 200 droplets ×
+16k rays = 3.2M AABB checks. Acceptable in numpy vectorisation.
+Worth it because uncorrelated rain points would jitter between frames
+and not look like rain — advected droplets produce visible streaks.
+
+### Decision 6 — Fusion posterior stays in panel 5 (top-right)
+We keep the existing `fusion.py` filter untouched. Panel 5 of the top
+row plots the running `p_fused` time series as a growing strip chart,
+so viewers can see both the current frame's sensor input AND the
+integrated belief state. This keeps SIM-002 in the story rather than
+burying it.
+
+### Decision 7 — Do NOT re-render curved_road demo in same PR
+SIM-007/008/009 re-generate the baseline and heavy-rain demos (those
+are the fusion-failure stories). The curved_road demo stays on its
+existing single-panel GIF because its purpose is to validate the
+bezier-pursuit + shadow-ray features, not sensor fusion. Re-rendering
+it with the grid layout would dilute the message. Can revisit later.
+
 ## 2026-04-26 — SIM-003 bezier_pursuit approximation
 
 The `bezier_pursuit` controller uses a **simplified** pure-pursuit: it
