@@ -17,9 +17,11 @@ in noisy environmental conditions (rain, dust).
 | `geometry.py`     | Vectorized ray-AABB slab test and Möller-Trumbore ray-triangle with ε guard     |
 | `lidar.py`        | Spherical LiDAR sweep (FoV / angular resolution / range), Gaussian + dropout    |
 | `camera.py`       | Pinhole eye-tracer, shaded RGB per pixel, temporal motion-blur by substepping   |
+| `fusion.py`       | 1D complementary filter: weighted LiDAR + camera detections → fused posterior   |
+| `render_video.py` | Stitches PNG frames into an annotated mp4 with per-frame tape-hit HUD overlay   |
 | `noise.py`        | Gaussian / uniform / drift noise injectors (ported from oasis-firmware sim)     |
 | `run.py`          | Fixed-dt orchestrator: controller → vehicle → cloth → LiDAR → camera → persist  |
-| `viz.py`          | Optional matplotlib visualisation of point cloud + image                         |
+| `viz.py`          | Optional matplotlib visualisation of point cloud + image                        |
 
 ## Install
 
@@ -48,6 +50,25 @@ Quick viz of the first frame:
 ```bash
 python -m oasis_sim_av.viz runs/<timestamp> --frame 0
 ```
+
+## Annotated video + fusion filter
+
+After a run you can:
+
+```bash
+# Stitch PNG frames into an annotated mp4 with a per-frame tape-hit HUD:
+oasis-sim-av-render-video runs/<timestamp>/ --fps 10
+#   -> runs/<timestamp>/video.mp4  (or video.gif if ffmpeg is unavailable)
+
+# Run the 1D complementary fusion filter (LiDAR + camera yellow detection):
+oasis-sim-av-fuse runs/<timestamp>/
+#   -> runs/<timestamp>/fusion.jsonl  + fusion.png
+```
+
+The baseline `police_tape_rain.yaml` is tuned so the fused posterior
+`P(tape)` stays below the detection threshold across the full run even
+though both raw sensors produce *some* signal — exactly the "each sensor
+almost-sees it, the filter still can't" breakdown the brief targets.
 
 ## Tests
 

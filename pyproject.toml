@@ -19,6 +19,8 @@ dependencies = [
 viz = [
     "matplotlib>=3.7",
     "imageio>=2.31",
+    "imageio-ffmpeg>=0.4",
+    "pillow>=10.0",
 ]
 dev = [
     "pytest>=7.4",
@@ -28,6 +30,8 @@ dev = [
 
 [project.scripts]
 oasis-sim-av = "oasis_sim_av.run:main"
+oasis-sim-av-render-video = "oasis_sim_av.render_video:main"
+oasis-sim-av-fuse = "oasis_sim_av.fusion:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
