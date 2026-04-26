@@ -31,14 +31,22 @@ Format: `- [ ] [ID] [STATE] description` where STATE ∈ `OPEN` / `CLAIMED` / `D
       priority: low
       notes: `camera.shadow_rays: true` flag. ~2x render cost, default off.
 
-- [ ] [SIM-005] [OPEN] BVH / uniform grid over the AABB scene to drop
-      per-ray-per-box cost from O(N*M) to O(N*log M). Worth it once the
-      building count > ~50.
+- [ ] [SIM-005] [DEFERRED 2026-04-26] BVH / uniform grid over the AABB scene
+      to drop per-ray-per-box cost from O(N*M) to O(N*log M). Worth it once
+      the building count > ~50.
       priority: low
+      notes: Deferred — current scenarios have ≤ 3 buildings (max 6 across
+      the repo). O(N*M) with M ≤ 6 is not the bottleneck; camera ray count
+      dominates. Revisit when a scenario adds > ~50 buildings, or when a
+      profile shows building-intersection cost > 20% of frame time.
 
-- [ ] [SIM-006] [OPEN] Optional `.las` export via `laspy` for interop with
-      commercial point-cloud tooling.
+- [ ] [SIM-006] [DEFERRED 2026-04-26] Optional `.las` export via `laspy` for
+      interop with commercial point-cloud tooling.
       priority: low
+      notes: Deferred — pure plumbing on top of the existing `.ply` writer.
+      Add when a concrete downstream consumer (e.g. a CloudCompare / QGIS
+      / PDAL workflow) actually requires ASPRS-compliant output. Until
+      then the extra `laspy` dependency is not justified.
 
 ## Done
 

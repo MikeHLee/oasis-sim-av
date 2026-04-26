@@ -6,16 +6,19 @@ github.com/MikeHLee/oasis-sim-av has three embedded demos:
   - `docs/demo_heavy_rain.gif`        fusion collapses (max p_fused = 0.137)
   - `docs/demo_curved_road.gif`       Bezier pursuit + cast shadows
 
-**Last agent:** opencode (SIM-001/002/003/004 round)
+SIM-005 and SIM-006 marked DEFERRED in `queue.md` (2026-04-26). No open
+work items remain against the MVP. Module is at a natural pause point
+until a new scenario / downstream consumer changes the calculus.
+
+**Last agent:** opencode (SIM-005/006 triage + defer)
 **Last update:** 2026-04-26
 
 **Blockers:** None.
 
 **Next touchable items:**
-- SIM-005 BVH / uniform grid scene acceleration. Needed once building count
-  > ~50; current scenes have ≤ 6. Defer until a scenario demands it.
-- SIM-006 `.las` export via laspy. Pure plumbing; add when a downstream
-  tool needs ASPRS-compliant clouds.
+- None currently. Un-defer SIM-005 only when a scenario with > ~50
+  buildings lands, or a profile shows AABB-intersection cost dominating
+  frame time. Un-defer SIM-006 only when an actual .las consumer appears.
 
 **Do not touch:**
 - `oasis-firmware/simulation/` — different domain, different deps.
@@ -25,3 +28,5 @@ github.com/MikeHLee/oasis-sim-av has three embedded demos:
 - `LIGHT_DIR` and `AMBIENT` constants in `camera.py` are used by both the
   shader and `test_shadow_mask_*` geometry expectations. If you re-tune,
   update the tests' pole / light geometry to match.
+- Don't speculatively implement SIM-005 or SIM-006 — they are deferred
+  by design, not by oversight. See queue.md notes before un-deferring.
