@@ -79,6 +79,13 @@ camera:
   fov_h_deg: 60.0
   width: 320
   height: 240
-  motion_blur_samples: 2        # lighter to offset shadow-ray cost
+  motion_blur_samples: 2
   exposure_s: 0.01
   shadow_rays: true
+
+bev:
+  center: [17.5, 0.0]
+  extent_m: 60.0
+  size_px: 256
+  show_vehicle_marker: true
+  show_road: true

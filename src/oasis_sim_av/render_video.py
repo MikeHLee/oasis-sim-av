@@ -3,6 +3,7 @@
 Usage
 -----
     oasis-sim-av-render-video runs/20260426-150646/ [--out demo.mp4] [--fps 10]
+    oasis-sim-av-render-video runs/20260426-150646/ --layout grid5x2
 
 The HUD shows, per frame:
     - simulation time (s)
@@ -10,6 +11,21 @@ The HUD shows, per frame:
     - returned tape hits (after noise/dropout)
     - a horizontal bar chart of returned-hit counts across time, so the
       ring-skip failure mode is visible at a glance.
+
+With --layout grid5x2, produces a 5×2 multi-view grid:
+    TOP ROW (vehicle camera):
+        1. Camera RGB (raw forward view)
+        2. Camera + 2D bboxes (oracle detector)
+        3. Camera + reprojected LiDAR points
+        4. Fused: camera + bboxes + LiDAR
+        5. Fusion posterior strip
+
+    BOTTOM ROW (world-fixed BEV):
+        6. BEV ground truth
+        7. BEV + driven-path trail
+        8. LiDAR BEV, colour-coded by kind
+        9. Fused BEV: ground-truth + LiDAR
+        10. Legend / HUD
 
 Dependencies (optional)
 -----------------------
@@ -26,8 +42,17 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
+
+from .overlays import (
+    draw_bboxes,
+    draw_fusion_strip,
+    rasterise_lidar_bev,
+    reproject_points_to_camera,
+    compose_grid5x2,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -214,8 +239,18 @@ def render_video(
     out: Path | None = None,
     fps: int = 10,
     save_frames: bool = False,
+    layout: Literal["single", "grid5x2"] = "single",
 ) -> Path:
-    """Stitch PNGs in ``<run_dir>/frames`` with HUD overlay; return output path."""
+    """Stitch PNGs in ``<run_dir>/frames`` with HUD overlay; return output path.
+
+    Parameters
+    ----------
+    layout : "single" or "grid5x2"
+        - "single": original camera+HUD view
+        - "grid5x2": 5×2 multi-view grid (requires BEV frames)
+    """
+    if layout == "grid5x2":
+        return render_video_grid5x2(run_dir, out, fps, save_frames)
     run_dir = Path(run_dir)
     state = load_state(run_dir)
     frame_rows = frame_records(state)
@@ -301,8 +336,223 @@ def main() -> None:
     p.add_argument("--fps", type=int, default=10)
     p.add_argument("--save-frames", action="store_true",
                    help="Also write annotated per-frame PNGs into <run_dir>/overlay/")
+    p.add_argument("--layout", choices=["single", "grid5x2"], default="single",
+                   help="Layout mode: single (camera+HUD) or grid5x2 (multi-view)")
     args = p.parse_args()
-    render_video(args.run_dir, args.out, fps=args.fps, save_frames=args.save_frames)
+    render_video(
+        args.run_dir, args.out, fps=args.fps,
+        save_frames=args.save_frames, layout=args.layout
+    )
+
+
+def render_video_grid5x2(
+    run_dir: Path,
+    out: Path | None = None,
+    fps: int = 10,
+    save_frames: bool = False,
+) -> Path:
+    """Stitch frames into a 5×2 multi-view grid video."""
+    run_dir = Path(run_dir)
+    state = load_state(run_dir)
+    frame_rows = frame_records(state)
+    if not frame_rows:
+        raise RuntimeError(f"No sensor frames recorded in {run_dir}/state.jsonl")
+
+    frames_dir = run_dir / "frames"
+    bev_dir = run_dir / "bev"
+    if not frames_dir.exists():
+        raise FileNotFoundError(f"{frames_dir} not found")
+
+    cfg = _load_config(run_dir)
+    has_bev = bev_dir.exists() and cfg is not None and cfg.bev is not None
+
+    frame_rows.sort(key=lambda r: int(r["frame_idx"]))
+    p_fused_series: list[float] = []
+
+    try:
+        import imageio.v3 as iio
+        reader = iio.imread
+    except ImportError:
+        reader = None
+
+    out_frames: list[np.ndarray] = []
+    overlay_dir = run_dir / "overlay_grid5x2"
+    if save_frames:
+        overlay_dir.mkdir(parents=True, exist_ok=True)
+
+    vehicle_trail: list[tuple[float, float]] = []
+
+    for i, rec in enumerate(frame_rows):
+        png_path = frames_dir / f"{int(rec['frame_idx']):06d}.png"
+        if not png_path.exists():
+            continue
+
+        if reader is None:
+            try:
+                from matplotlib.image import imread as mpl_imread
+                img = (mpl_imread(str(png_path))[..., :3] * 255).astype(np.uint8)
+            except ImportError:
+                raise RuntimeError("Need imageio or matplotlib") from None
+        else:
+            img = reader(str(png_path))
+            if img.ndim == 2:
+                img = np.stack([img] * 3, axis=-1)
+            img = img[..., :3].astype(np.uint8)
+
+        H, W = img.shape[:2]
+
+        panel1 = img.copy()
+        detections = rec.get("detections", [])
+        panel2 = draw_bboxes(panel1, detections) if detections else panel1.copy()
+
+        panel3 = img.copy()
+        panel4 = img.copy()
+
+        fusion_jsonl = run_dir / "fusion.jsonl"
+        if fusion_jsonl.exists() and len(p_fused_series) <= i:
+            with open(fusion_jsonl) as f:
+                lines = f.readlines()
+            if i < len(lines):
+                import json as json_mod
+                p_fused_series.append(
+                    json_mod.loads(lines[i])["p_fused"]
+                )
+
+        panel5 = draw_fusion_strip(p_fused_series[: i + 1], W, H)
+
+        panels: list[np.ndarray] = [panel1, panel2, panel3, panel4, panel5]
+
+        if has_bev:
+            bev_png = bev_dir / f"{int(rec['frame_idx']):06d}.png"
+            if bev_png.exists():
+                if reader is None:
+                    from matplotlib.image import imread as mpl_imread
+                    bev_img = (mpl_imread(str(bev_png))[..., :3] * 255).astype(np.uint8)
+                else:
+                    bev_img = reader(str(bev_png))
+                    if bev_img.ndim == 2:
+                        bev_img = np.stack([bev_img] * 3, axis=-1)
+                    bev_img = bev_img[..., :3].astype(np.uint8)
+                panel6 = bev_img
+            else:
+                panel6 = np.zeros((H, W, 3), dtype=np.uint8)
+
+            veh = rec.get("vehicle", {})
+            vehicle_trail.append((veh.get("x", 0.0), veh.get("y", 0.0)))
+
+            panel7 = _draw_trail_on_bev(panel6, vehicle_trail, cfg)
+
+            lidar = rec.get("lidar", {})
+            panel8 = np.zeros((H, W, 3), dtype=np.uint8) + 30
+
+            panel9 = panel7.copy()
+        else:
+            panel6 = panel7 = panel8 = panel9 = np.zeros((H, W, 3), dtype=np.uint8)
+
+        t = float(rec.get("t", 0.0))
+        veh = rec.get("vehicle", {})
+        speed = veh.get("v", 0.0)
+        n_boxes = len(detections)
+        p_current = p_fused_series[-1] if p_fused_series else 0.0
+        footer = f"t={t:.2f}s  v={speed:.1f}m/s  det={n_boxes}  p_fused={p_current:.2f}"
+
+        titles = [
+            "Camera RGB",
+            "Camera + Det",
+            "Camera + LiDAR",
+            "Fused",
+            "P(fused)",
+            "BEV Truth",
+            "BEV + Trail",
+            "LiDAR BEV",
+            "Fused BEV",
+            "HUD",
+        ]
+
+        panel10 = np.zeros((H, W, 3), dtype=np.uint8)
+        panel10[:] = [20, 20, 25]
+        _draw_hud_text(panel10, footer)
+
+        panels.extend([panel6, panel7, panel8, panel9, panel10])
+
+        composed = compose_grid5x2(panels, titles=titles, footer_text=footer)
+        out_frames.append(composed)
+
+        if save_frames:
+            try:
+                from matplotlib.image import imsave
+                imsave(overlay_dir / f"{i:06d}.png", composed)
+            except ImportError:
+                np.save(overlay_dir / f"{i:06d}.npy", composed)
+
+    out_path = Path(out) if out else run_dir / "video_grid5x2.mp4"
+    written = _encode_video(out_frames, out_path, fps=fps)
+    if written is not None:
+        print(f"[render] wrote {written} ({len(out_frames)} frames at {fps} fps)",
+              file=sys.stderr)
+        return written
+
+    overlay_dir.mkdir(parents=True, exist_ok=True)
+    for i, f in enumerate(out_frames):
+        try:
+            from matplotlib.image import imsave
+            imsave(overlay_dir / f"{i:06d}.png", f)
+        except ImportError:
+            np.save(overlay_dir / f"{i:06d}.npy", f)
+    return overlay_dir
+
+
+def _load_config(run_dir: Path):
+    try:
+        from .config import ScenarioConfig
+        cfg_path = run_dir / "config.yaml"
+        if cfg_path.exists():
+            return ScenarioConfig.from_yaml(cfg_path)
+    except Exception:
+        pass
+    return None
+
+
+def _draw_trail_on_bev(bev_img: np.ndarray, trail: list[tuple[float, float]], cfg) -> np.ndarray:
+    """Draw vehicle trail on BEV image."""
+    if not trail or cfg is None or cfg.bev is None:
+        return bev_img
+
+    out = bev_img.copy()
+    H, W = out.shape[:2]
+    center = cfg.bev.center
+    extent = cfg.bev.extent_m
+    half = extent / 2.0
+
+    for i, (x, y) in enumerate(trail):
+        px = int((x - (center[0] - half)) / extent * W)
+        py = int((y - (center[1] - half)) / extent * H)
+        if 0 <= px < W and 0 <= py < H:
+            alpha = 0.3 + 0.7 * (i / max(len(trail), 1))
+            out[py, px] = [int(255 * alpha), int(80 * alpha), int(80 * alpha)]
+
+    return out
+
+
+def _draw_hud_text(img: np.ndarray, text: str) -> None:
+    """Draw HUD text on the legend panel."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        pil = Image.fromarray(img)
+        draw = ImageDraw.Draw(pil)
+        try:
+            import matplotlib
+            fp = Path(matplotlib.__file__).parent / "mpl-data" / "fonts" / "ttf" / "DejaVuSans.ttf"
+            if fp.exists():
+                font = ImageFont.truetype(str(fp), size=12)
+            else:
+                font = ImageFont.load_default()
+        except Exception:
+            font = ImageFont.load_default()
+        draw.text((8, 8), text, fill=(200, 200, 200), font=font)
+        img[:] = np.asarray(pil)
+    except ImportError:
+        pass
 
 
 if __name__ == "__main__":

@@ -30,6 +30,9 @@ from .config import ScenarioConfig
 from .lidar import SimulatedLiDAR
 from .vehicle import KinematicBicycle, make_controller
 from .world import World
+from .bev import BEVRenderer
+from .detect import OracleDetector, OracleDetectorConfig
+from .rain import RainField
 
 
 # ---------------------------------------------------------------------------
@@ -38,6 +41,8 @@ def run(cfg: ScenarioConfig, out_root: Path, log: bool = True) -> Path:
     run_dir = out_root / datetime.now().strftime("%Y%m%d-%H%M%S")
     (run_dir / "frames").mkdir(parents=True, exist_ok=True)
     (run_dir / "lidar").mkdir(parents=True, exist_ok=True)
+    if cfg.bev is not None:
+        (run_dir / "bev").mkdir(parents=True, exist_ok=True)
     cfg.to_yaml(run_dir / "config.yaml")
 
     rng = np.random.default_rng(cfg.seed)
@@ -48,6 +53,20 @@ def run(cfg: ScenarioConfig, out_root: Path, log: bool = True) -> Path:
     controller = make_controller(cfg.vehicle.controller)
     lidar = SimulatedLiDAR.from_config(cfg.lidar, rng)
     camera = PinholeCamera.from_config(cfg.camera)
+    bev_renderer = BEVRenderer.from_config(cfg.bev) if cfg.bev else None
+
+    detector = OracleDetector(
+        OracleDetectorConfig(),
+        cfg.camera,
+        rain_dropout_prob=cfg.lidar.rain_dropout_prob,
+        rng=rng,
+    )
+
+    rain_field: RainField | None = None
+    if cfg.rain_clutter is not None and cfg.rain_clutter.enabled:
+        rain_field = RainField.from_config(
+            cfg.rain_clutter, world.ground_z, rng
+        )
 
     # Settle cloth under gravity for a moment so it sags naturally before t=0
     for _ in range(50):
@@ -71,6 +90,10 @@ def run(cfg: ScenarioConfig, out_root: Path, log: bool = True) -> Path:
 
             # Cloth physics
             cloth.step(cfg.dt)
+
+            # Rain field advection
+            if rain_field is not None:
+                rain_field.step(cfg.dt)
 
             # Sensors fire every `sensor_stride` sim steps
             fire_sensors = (step_i % sensor_stride == 0)
@@ -142,6 +165,18 @@ def run(cfg: ScenarioConfig, out_root: Path, log: bool = True) -> Path:
                     lidar.write_ply(scan, str(run_dir / "lidar" / f"{frame_idx:06d}.ply"))
                 if cfg.output.save_png:
                     _write_png(run_dir / "frames" / f"{frame_idx:06d}.png", img)
+
+                if bev_renderer is not None and cfg.output.save_png:
+                    v0_tri, v1_tri, v2_tri = cloth.triangles()
+                    bev_img = bev_renderer.render(
+                        world, v0_tri, v1_tri, v2_tri, vehicle.state
+                    )
+                    _write_png(run_dir / "bev" / f"{frame_idx:06d}.png", bev_img)
+
+                detections = detector.detect_to_dict(
+                    cloth, vehicle, vehicle.pose_xyz(), vehicle.body_to_world()
+                )
+                record["detections"] = detections
 
                 record["lidar"] = {
                     "n_rays": scan.n_rays,

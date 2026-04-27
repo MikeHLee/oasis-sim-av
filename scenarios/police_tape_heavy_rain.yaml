@@ -82,3 +82,10 @@ camera:
   height: 240
   motion_blur_samples: 4
   exposure_s: 0.02
+
+bev:
+  center: [15.0, 0.0]
+  extent_m: 50.0
+  size_px: 256
+  show_vehicle_marker: true
+  show_road: true

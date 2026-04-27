@@ -1,76 +1,77 @@
 # State — oasis-sim-av
 
-**Focus:** Handoff point. SIM-001..004 shipped; SIM-005/006 deferred;
-SIM-007/008/009 spec **frozen in queue.md** but **not yet implemented**.
-Next agent should open `.swarm/queue.md` and begin with SIM-007.
+**Focus:** SIM-007, SIM-008, SIM-009 shipped. Multi-view demo grid5x2
+infrastructure complete. 78/78 tests pass.
 
-52/52 tests pass in ~1.2s. Three baseline demos embedded in `docs/`
-(single-panel — to be superseded by grid by SIM-007).
-
-**Last agent:** opencode (2026-04-26 spec-freeze session)
+**Last agent:** opencode (2026-04-26 multi-view demo implementation)
 **Last update:** 2026-04-26
 
-**Blockers:** None. All spec decisions resolved with user (see memory.md
-entry "SIM-007/008/009 multi-view demo spec" for the 7 decisions made).
+**Blockers:** None.
 
-## Handoff notes for next agent
+## Summary of completed work
 
-1. **Read first**: `.swarm/memory.md` — SIM-007/008/009 entry. It records
-   7 design decisions that were resolved with the user; do not re-litigate
-   them without fresh user input:
-     - Layout is 5×2 (not 5×3)
-     - BEV is world-fixed orthographic, per-scenario anchored
-     - Detector is oracle with **condition-dependent** noise (not iid)
-     - Rain clutter is **visual-only**, clean scans untouched
-     - Droplets are advected, not uncorrelated
-     - Fusion posterior stays as panel 5 (top-right)
-     - curved_road demo is NOT re-rendered in this round
+### SIM-007: Multi-view 5×2 grid renderer + BEV
+- Added `BEVConfig` to config.py and `BEVRenderer` in new `bev.py` module
+- Created `overlays.py` with `reproject_points_to_camera`, `rasterise_lidar_bev`,
+  `draw_bboxes`, `draw_fusion_strip`, and `compose_grid5x2` helpers
+- Extended `run.py` to write `bev/NNNNNN.png` alongside frames when BEV configured
+- Added `--layout grid5x2` to `render_video.py` for multi-view composition
+- Added `bev:` config blocks to all three scenario YAMLs
+- 16 tests in test_bev.py and test_overlays.py
 
-2. **Implementation order** (each PR-sized, each independently testable):
-     - SIM-007 first (layout infra + BEVRenderer + reprojection helpers)
-     - SIM-008 on top (oracle detector)
-     - SIM-009 last (rain clutter)
+### SIM-008: Oracle-projection detector
+- Created `detect.py` with `OracleDetector` class
+- Condition-dependent noise based on range, rain_dropout_prob, cloth velocity
+- Detections recorded in state.jsonl per frame
+- 5 tests in test_detect.py
 
-3. **Critical regressions to preserve**:
-     - `test_baseline_tape_stays_below_threshold` — fusion tuning
-     - `FusionConfig` defaults (alpha, detect_threshold, lidar_peak)
-     - Published `max_p_fused` numbers in README (0.977 / 0.137)
-     - Clean `.ply` scan contents (no rain points in files)
-     - `LIGHT_DIR` / `AMBIENT` constants (shadow test dependencies)
+### SIM-009: Rain field (advected droplets)
+- Created `rain.py` with `RainField` class
+- Added `RainClutterConfig` to config.py
+- Droplets advect downward, recycle at ground
+- 5 tests in test_rain.py
 
-4. **New modules to add** (per spec in queue.md):
-     - `src/oasis_sim_av/bev.py`       — BEVRenderer
-     - `src/oasis_sim_av/overlays.py`  — reprojection + rasterisers
-     - `src/oasis_sim_av/detect.py`    — OracleDetector (SIM-008)
-     - `src/oasis_sim_av/rain.py`      — RainField (SIM-009)
+## New modules
 
-5. **Existing modules to extend**:
-     - `config.py`          add `BEVConfig`, `RainClutterConfig`
-     - `run.py`             write `bev/NNNNNN.png` alongside frames
-     - `render_video.py`    add `--layout grid5x2`
-     - Three scenario YAMLs add `bev:` and (where relevant) `rain_clutter:`
+| Module | Purpose |
+|--------|---------|
+| `src/oasis_sim_av/bev.py` | BEVRenderer - world-fixed orthographic top-down |
+| `src/oasis_sim_av/overlays.py` | Reprojection, rasterisation, bbox, fusion strip, grid composition |
+| `src/oasis_sim_av/detect.py` | OracleDetector - condition-modulated projection detector |
+| `src/oasis_sim_av/rain.py` | RainField - advected droplet field for visual-only clutter |
 
-6. **Bootstrap check for next session**:
-     ```
-     cd oasis-sim-av
-     git status                  # should be clean
-     pytest -v                   # baseline must be 52/52 green
-     cat .swarm/queue.md         # read SIM-007 spec in full
-     cat .swarm/memory.md | head -80   # read 7 decisions
-     ```
+## New config blocks
 
-**Do not touch:**
-- `oasis-firmware/simulation/` — different domain, different deps.
+```yaml
+bev:
+  center: [15.0, 0.0]
+  extent_m: 50.0
+  size_px: 256
+  show_vehicle_marker: true
+  show_road: true
+
+rain_clutter:
+  enabled: false
+  n_droplets: 200
+  spawn_box: [10.0, -5.0, 0.0, 20.0, 5.0, 3.0]
+  fall_velocity_m_s: 5.0
+  jitter_std_m_s: 0.3
+  droplet_radius_m: 0.02
+```
+
+## Tests
+
+78 tests pass (was 52, added 26 new tests across 4 new test files).
+
+## Next steps
+
+- Re-render baseline and heavy_rain demos with `--layout grid5x2`
+- Optionally integrate rain clutter into LiDAR scan for visualization
+- Update README with new demo GIFs once re-rendered
+
+## Do not touch (from prior session)
+
 - Detection threshold + alpha in `FusionConfig` are tuned against the
-  baseline scenario. Don't re-tune defaults without updating the
-  `test_baseline_tape_stays_below_threshold` test.
-- `LIGHT_DIR` and `AMBIENT` constants in `camera.py` are used by both the
-  shader and `test_shadow_mask_*` geometry expectations. If you re-tune,
-  update the tests' pole / light geometry to match.
-- Don't speculatively implement SIM-005 or SIM-006 — they are deferred
-  by design, not by oversight. See queue.md notes before un-deferring.
-- Don't re-open the 7 spec decisions listed in memory.md without new
-  user input. They were each discussed and resolved deliberately.
-- Don't merge rain clutter into clean scan output. Clean scan
-  bit-identity with pre-SIM-009 is a load-bearing property — it is how
-  we avoid re-tuning all the fusion baselines.
+  baseline scenario
+- `LIGHT_DIR` and `AMBIENT` constants in `camera.py`
+- Clean `.ply` scan contents (no rain points in files)

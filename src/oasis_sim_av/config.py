@@ -98,9 +98,30 @@ class CameraConfig:
 
 
 @dataclass
+class BEVConfig:
+    center: list[float] = field(default_factory=lambda: [15.0, 0.0])
+    extent_m: float = 50.0
+    size_px: int = 256
+    show_vehicle_marker: bool = True
+    show_road: bool = True
+
+
+@dataclass
+class RainClutterConfig:
+    enabled: bool = False
+    n_droplets: int = 200
+    spawn_box: list[float] = field(
+        default_factory=lambda: [10.0, -5.0, 0.0, 20.0, 5.0, 3.0]
+    )
+    fall_velocity_m_s: float = 5.0
+    jitter_std_m_s: float = 0.3
+    droplet_radius_m: float = 0.02
+
+
+@dataclass
 class OutputConfig:
     dir: str = "runs"
-    frame_every: int = 10   # simulate sensors every Nth sim step
+    frame_every: int = 10
     save_png: bool = True
     save_ply: bool = True
     save_jsonl: bool = True
@@ -116,6 +137,8 @@ class ScenarioConfig:
     lidar: LiDARConfig = field(default_factory=LiDARConfig)
     camera: CameraConfig = field(default_factory=CameraConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    bev: BEVConfig | None = None
+    rain_clutter: RainClutterConfig | None = None
 
     # -----------------------------------------------------------------------
     # IO
@@ -151,6 +174,10 @@ class ScenarioConfig:
         lidar = LiDARConfig(**(data.get("lidar", {}) or {}))
         cam = CameraConfig(**(data.get("camera", {}) or {}))
         out = OutputConfig(**(data.get("output", {}) or {}))
+        bev_data = data.get("bev", None)
+        bev = BEVConfig(**bev_data) if bev_data else None
+        rain_data = data.get("rain_clutter", None)
+        rain_clutter = RainClutterConfig(**rain_data) if rain_data else None
         return cls(
             seed=data.get("seed", 42),
             duration_s=data.get("duration_s", 10.0),
@@ -160,6 +187,8 @@ class ScenarioConfig:
             lidar=lidar,
             camera=cam,
             output=out,
+            bev=bev,
+            rain_clutter=rain_clutter,
         )
 
     def to_dict(self) -> dict[str, Any]:
