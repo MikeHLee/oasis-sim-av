@@ -61,6 +61,19 @@ class VehicleControllerConfig:
     )
     bezier_lookahead_m: float = 5.0
     bezier_max_delta_rad: float = 0.5
+    # SIM-011: perception-aware safety cautious_wrapper.
+    # When `cautious=True`, the base controller's velocity command is
+    # modulated by the running fusion posterior `p_fused`:
+    #
+    #     scale = clip(p_fused / cautious_p_threshold, cautious_min_v_frac, 1.0)
+    #     v_out = base_v * scale
+    #
+    # Steering is untouched. Frames with p_fused < abstain_p_threshold are
+    # logged to `<run_dir>/abstain.jsonl` for active-learning review.
+    cautious: bool = False
+    cautious_p_threshold: float = 0.5
+    cautious_min_v_frac: float = 0.1
+    abstain_p_threshold: float = 0.2
 
 
 @dataclass

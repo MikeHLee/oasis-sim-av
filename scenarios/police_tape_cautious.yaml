@@ -1,0 +1,108 @@
+# Police tape in heavy rain + CAUTIOUS controller (SIM-012).
+#
+# Identical world to `police_tape_heavy_rain.yaml` (sensor-fusion collapse
+# regime: 30% LiDAR dropout, 8 cm σ, sub-pixel tape footprint, violently
+# fluttering cloth) but wires up the new SIM-011 in-loop-fusion safety
+# behaviour so the demo is reproducible from CLI without editing Python.
+#
+# Controller is `bezier_pursuit` to exercise the perception-aware
+# path-follower along the straight road, with `cautious: true` so the
+# running fusion posterior modulates the velocity command each step.
+#
+# Expected outcome, as documented in the README:
+#   aggressive (police_tape_heavy_rain.yaml): ~9.95 m travelled in 2 s
+#   cautious   (this scenario):               ~1.08 m travelled in 2 s
+#   → abstain.jsonl carries ~20 low-confidence frames for downstream review
+#
+# Run:
+#   oasis-sim-av scenarios/police_tape_cautious.yaml
+#   oasis-sim-av-render-video runs/<stamp>/ --layout grid5x2
+
+seed: 7
+duration_s: 3.0
+dt: 0.01
+
+output:
+  dir: runs
+  frame_every: 10
+  save_png: true
+  save_ply: true
+  save_jsonl: true
+
+world:
+  ground_z: 0.0
+  buildings:
+    - aabb: [-30.0, -20.0, 0.0, -10.0,  -5.0, 22.0]
+    - aabb: [-30.0,   5.0, 0.0, -10.0,  20.0, 24.0]
+    - aabb: [ 40.0, -20.0, 0.0,  60.0,  -5.0, 30.0]
+    - aabb: [ 40.0,   5.0, 0.0,  60.0,  20.0, 18.0]
+  roads:
+    - - [-40.0, -5.0]
+      - [ 70.0, -5.0]
+      - [ 70.0,  5.0]
+      - [-40.0,  5.0]
+  tape:
+    anchor_a: [ 40.0, -5.0, 3.0 ]
+    anchor_b: [ 60.0, -5.0, 3.0 ]
+    length: 20.6
+    width: 0.03
+    n_length: 30
+    n_width: 2
+    mass_per_particle: 0.008
+    spring_k: 400.0
+    spring_damping: 0.5
+    global_damping: 0.02
+    wind_bias:   [0.5, 1.8, 0.3]
+    wind_noise_std: 4.0
+
+vehicle:
+  wheelbase: 2.7
+  initial_x: -30.0
+  initial_y: 0.0
+  initial_theta: 0.0
+  controller:
+    type: bezier_pursuit
+    base_v: 5.0
+    # Centerline sits on the road's midline for the full length so the
+    # pure-pursuit geometry is well-defined even when cautious-mode
+    # slowdown keeps the vehicle near its spawn point.
+    bezier_control_points:
+      - [-30.0, 0.0]
+      - [  0.0, 0.0]
+      - [ 30.0, 0.0]
+      - [ 60.0, 0.0]
+    bezier_lookahead_m: 5.0
+    bezier_max_delta_rad: 0.5
+    # SIM-011 cautious-mode parameters.  Matches the README's
+    # "9.95 m vs 1.08 m" comparison numbers.
+    cautious: true
+    cautious_p_threshold: 0.5
+    cautious_min_v_frac: 0.1
+    abstain_p_threshold: 0.3
+
+lidar:
+  offset: [0.0, 0.0, 1.7]
+  elevation_fov_deg: [-10.0, 8.0]
+  elevation_rings: 24
+  azimuth_fov_deg: [-30.0, 30.0]
+  azimuth_rays: 384
+  range_m: 80.0
+  range_noise_std_m: 0.08
+  rain_dropout_prob: 0.30
+
+camera:
+  offset: [1.5, 0.0, 1.4]
+  forward: [1.0, 0.0, 0.0]
+  up: [0.0, 0.0, 1.0]
+  fov_h_deg: 60.0
+  width: 320
+  height: 240
+  motion_blur_samples: 4
+  exposure_s: 0.02
+
+bev:
+  center: [15.0, 0.0]
+  extent_m: 50.0
+  size_px: 256
+  show_vehicle_marker: true
+  show_road: true

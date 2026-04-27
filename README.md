@@ -12,15 +12,19 @@ in noisy environmental conditions (rain, dust).
 | Module            | Physics / math                                                                  |
 |-------------------|---------------------------------------------------------------------------------|
 | `world.py`        | Axis-aligned-bounding-box (AABB) city + ground plane + road polygons            |
-| `vehicle.py`      | Kinematic bicycle model, inputs: forward velocity `v` and steering angle `δ`    |
+| `vehicle.py`      | Kinematic bicycle model; controllers accept an optional `percept` kwarg so they can react to fusion confidence (SIM-011) |
 | `cloth.py`        | 3D mass-spring grid for the tape, symplectic Euler integration, wind forcing    |
 | `geometry.py`     | Vectorized ray-AABB slab test and Möller-Trumbore ray-triangle with ε guard     |
-| `lidar.py`        | Spherical LiDAR sweep (FoV / angular resolution / range), Gaussian + dropout    |
+| `lidar.py`        | Spherical LiDAR sweep (FoV / angular resolution / range), Gaussian + dropout. Writes both `.ply` (external) and `.npz` (lossless kind-preserving sidecar). |
 | `camera.py`       | Pinhole eye-tracer, shaded RGB per pixel, temporal motion-blur by substepping   |
-| `fusion.py`       | 1D complementary filter: weighted LiDAR + camera detections → fused posterior   |
-| `render_video.py` | Stitches PNG frames into an annotated mp4 with per-frame tape-hit HUD overlay   |
+| `bev.py`          | World-fixed orthographic bird's-eye-view renderer (SIM-007)                     |
+| `detect.py`       | Oracle-projection detector with condition-dependent noise (SIM-008)             |
+| `rain.py`         | Advected droplet field for visual-only LiDAR clutter (SIM-009)                  |
+| `overlays.py`     | LiDAR→camera reprojection, LiDAR BEV rasterisation, bbox overlay, fusion strip, 5×2 grid composer |
+| `fusion.py`       | 1D complementary filter: weighted LiDAR + camera detections → fused posterior. Runs both offline (CLI) and in-loop (SIM-011) so controllers see confidence per step. |
+| `render_video.py` | Stitches PNG frames into an annotated mp4 with either single-panel HUD or 5×2 multi-view grid |
 | `noise.py`        | Gaussian / uniform / drift noise injectors (ported from oasis-firmware sim)     |
-| `run.py`          | Fixed-dt orchestrator: controller → vehicle → cloth → LiDAR → camera → persist  |
+| `run.py`          | Fixed-dt orchestrator: controller → vehicle → cloth → sensors → in-loop fusion → persistence → abstention log |
 | `viz.py`          | Optional matplotlib visualisation of point cloud + image                        |
 
 ## Install
@@ -40,8 +44,11 @@ Artifacts land in `runs/<timestamp>/`:
 ```
 runs/20260426-142300/
 ├── frames/            000000.png  000001.png  ...
-├── lidar/             000000.ply  000001.ply  ...
-├── state.jsonl        per-step vehicle + cloth-energy + scan summary
+├── lidar/             000000.ply  000001.ply  000000.npz  ...  # .npz is a kind-preserving sidecar
+├── lidar_viz/         000000.npz  ...                          # rain-augmented scan, only when rain_clutter enabled
+├── bev/               000000.png  ...                          # top-down orthographic, only when cfg.bev set
+├── state.jsonl        per-step vehicle + cloth-energy + scan summary + in-loop fusion posterior
+├── abstain.jsonl      active-learning queue of low-confidence frames (SIM-011)
 └── config.yaml        resolved config, pinned for repro
 ```
 
@@ -57,10 +64,26 @@ After a run you can stitch the PNG frames into an annotated video and run
 the 1D complementary fusion filter over the sensor stream:
 
 ```bash
-oasis-sim-av-render-video runs/<timestamp>/ --fps 10
+oasis-sim-av-render-video runs/<timestamp>/ --fps 10                    # single-panel HUD
+oasis-sim-av-render-video runs/<timestamp>/ --fps 10 --layout grid5x2   # 5×2 multi-view grid (SIM-007/010)
 oasis-sim-av-fuse         runs/<timestamp>/
-# -> video.mp4 + video.gif, fusion.jsonl + fusion.png
+# -> video.mp4 / video_grid5x2.mp4, fusion.jsonl + fusion.png
 ```
+
+### Multi-view layout (`--layout grid5x2`)
+
+```
+┌──────────┬──────────┬──────────────┬──────────────┬──────────┐
+│ Camera   │ Camera   │ Camera +     │ Fused        │ P(fused) │  ← vehicle camera
+│ RGB      │ + Det    │ LiDAR reproj │ (cam+det+LiD)│ strip    │
+├──────────┼──────────┼──────────────┼──────────────┼──────────┤
+│ BEV      │ BEV +    │ LiDAR BEV    │ Fused BEV    │ HUD /    │  ← world-fixed BEV
+│ Truth    │ Trail    │ (kind-colour)│ (truth+LiDAR)│ footer   │
+└──────────┴──────────┴──────────────┴──────────────┴──────────┘
+```
+
+LiDAR kind colours in panels 3, 4, 8, 9: ground (olive), building (grey),
+tape (yellow), rain droplets (cyan, only when `rain_clutter.enabled`).
 
 ### Demo 1 — baseline `police_tape_rain.yaml` (fusion **recovers**)
 
@@ -69,8 +92,8 @@ noisy and intermittent but the camera picks up a persistent chromatic
 signal. The complementary filter integrates both into a usable posterior
 that crosses the detection threshold.
 
+![baseline multi-view grid5x2](docs/demo_baseline_grid5x2.gif)
 ![baseline HUD overlay](docs/demo_baseline.gif)
-
 ![baseline fusion posterior](docs/demo_baseline_fusion.png)
 
 ```text
@@ -85,8 +108,8 @@ its angular footprint is sub-pixel in the camera, and a thinner, more
 violently fluttering cloth. Both sensors produce only sporadic, weak
 returns; the fused posterior never approaches the threshold:
 
+![heavy rain multi-view grid5x2](docs/demo_heavy_rain_grid5x2.gif)
 ![heavy rain HUD overlay](docs/demo_heavy_rain.gif)
-
 ![heavy rain fusion posterior](docs/demo_heavy_rain_fusion.png)
 
 ```text
@@ -96,8 +119,35 @@ $ oasis-sim-av-fuse runs/<stamp>/
 
 This is the "joint sensor failure" regime the brief targets: each sensor's
 noise floor exceeds its signal, and no linear combination recovers the
-object. It motivates the next round of work (richer priors, temporal
-models like EKFs, or active-sensing strategies).
+object. The next section shows how the cautious controller converts this
+into a safety behaviour.
+
+### Low-confidence slowdown + active-learning abstention (SIM-011)
+
+Every sensor fire now feeds the complementary filter **in-loop**, so the
+running `p_fused` is available to the controller each step via a
+`percept` argument. Setting `vehicle.controller.cautious: true` modulates
+velocity by confidence:
+
+```text
+scale = clip(p_fused / cautious_p_threshold, cautious_min_v_frac, 1.0)
+v_out = base_v * scale
+```
+
+Steering is never modulated (see `.swarm/memory.md` Decision 5).
+
+Heavy-rain scenario, `cautious_p_threshold=0.5`, `cautious_min_v_frac=0.1`,
+`abstain_p_threshold=0.3`:
+
+| Mode       | Distance travelled in 2 s | Abstain entries |
+|------------|---------------------------|-----------------|
+| aggressive | 9.95 m                    | —               |
+| cautious   | **1.08 m**                | **20**          |
+
+Frames where `p_fused < abstain_p_threshold` are serialised to
+`<run_dir>/abstain.jsonl`, one JSON-per-line with frame index, time,
+all three posteriors, detection count, vehicle pose, and a `reason`
+field — a ready-made active-learning queue for downstream labelling.
 
 ### Demo 3 — curved road + hard shadows (`curved_road.yaml`)
 

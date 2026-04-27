@@ -1,77 +1,64 @@
 # State — oasis-sim-av
 
-**Focus:** SIM-007, SIM-008, SIM-009 shipped. Multi-view demo grid5x2
-infrastructure complete. 78/78 tests pass.
+**Focus:** SIM-012 through SIM-019 (except SIM-015 deferred) shipped. 91/91 tests pass.
 
-**Last agent:** opencode (2026-04-26 multi-view demo implementation)
-**Last update:** 2026-04-26
+**Last agent:** opencode (2026-04-27 SIM-012/013/014/016/017/018/019)
+**Last update:** 2026-04-27
 
 **Blockers:** None.
 
-## Summary of completed work
+## Summary of this session
 
-### SIM-007: Multi-view 5×2 grid renderer + BEV
-- Added `BEVConfig` to config.py and `BEVRenderer` in new `bev.py` module
-- Created `overlays.py` with `reproject_points_to_camera`, `rasterise_lidar_bev`,
-  `draw_bboxes`, `draw_fusion_strip`, and `compose_grid5x2` helpers
-- Extended `run.py` to write `bev/NNNNNN.png` alongside frames when BEV configured
-- Added `--layout grid5x2` to `render_video.py` for multi-view composition
-- Added `bev:` config blocks to all three scenario YAMLs
-- 16 tests in test_bev.py and test_overlays.py
+### SIM-012: Cautious-mode demo scenario
+- Created `scenarios/police_tape_cautious.yaml` with bezier_pursuit + cautious=true
+- Identical world to heavy_rain but wires up safety behaviour via CLI
+- README "9.95 m → 1.08 m" comparison now one command away
 
-### SIM-008: Oracle-projection detector
-- Created `detect.py` with `OracleDetector` class
-- Condition-dependent noise based on range, rain_dropout_prob, cloth velocity
-- Detections recorded in state.jsonl per frame
-- 5 tests in test_detect.py
+### SIM-013: Abstention reason taxonomy
+- Expanded abstain.jsonl reasons from single to prioritized taxonomy:
+  1. cloth_velocity_excessive (RMS > 3 m/s)
+  2. lidar_dropout_rate_high (> 2x baseline + 0.1)
+  3. n_detections_flicker (detector dropped vs prior frame)
+  4. p_fused_below_threshold (catch-all)
+- Added `_classify_abstain_reason()` helper in run.py
 
-### SIM-009: Rain field (advected droplets)
-- Created `rain.py` with `RainField` class
-- Added `RainClutterConfig` to config.py
-- Droplets advect downward, recycle at ground
-- 5 tests in test_rain.py
+### SIM-014: Percept-aware bezier_pursuit
+- New `_wrap_cautious_bezier()` tightens max_delta at low p_fused
+- Delta scale = 0.6 + 0.4 * (p/p_thresh) when below threshold
+- Registered in `make_controller()` for bezier_pursuit + cautious
 
-## New modules
+### SIM-015: EKF/UKF on p_fused (DEFERRED)
+- Documented in memory.md Decision 8 as SIM-v2 milestone
+- ComplementaryFilter remains first-order low-pass per CONTEXT.md
 
-| Module | Purpose |
-|--------|---------|
-| `src/oasis_sim_av/bev.py` | BEVRenderer - world-fixed orthographic top-down |
-| `src/oasis_sim_av/overlays.py` | Reprojection, rasterisation, bbox, fusion strip, grid composition |
-| `src/oasis_sim_av/detect.py` | OracleDetector - condition-modulated projection detector |
-| `src/oasis_sim_av/rain.py` | RainField - advected droplet field for visual-only clutter |
+### SIM-016: grid5x2 macro-block fix
+- `compose_grid5x2()` now pads total_h to be divisible by 16
+- Eliminates imageio "resizing from (1600, 572) to (1600, 576)" warning
 
-## New config blocks
+### SIM-017: Empty abstain.jsonl documentation
+- Already documented in memory.md Decision 7 — confirmed intentional
 
-```yaml
-bev:
-  center: [15.0, 0.0]
-  extent_m: 50.0
-  size_px: 256
-  show_vehicle_marker: true
-  show_road: true
+### SIM-018: max_detection_score in percept
+- Added to percept dict each frame
+- Enables distinguishing "oracle sees tape but fusion disagrees"
 
-rain_clutter:
-  enabled: false
-  n_droplets: 200
-  spawn_box: [10.0, -5.0, 0.0, 20.0, 5.0, 3.0]
-  fall_velocity_m_s: 5.0
-  jitter_std_m_s: 0.3
-  droplet_radius_m: 0.02
-```
-
-## Tests
-
-78 tests pass (was 52, added 26 new tests across 4 new test files).
+### SIM-019: Curved road grid5x2 re-render
+- Generated docs/demo_curved_road_grid5x2.mp4 (20 frames at 10 fps)
+- Shows bezier_pursuit path trail nicely in panel 7
 
 ## Next steps
 
-- Re-render baseline and heavy_rain demos with `--layout grid5x2`
-- Optionally integrate rain clutter into LiDAR scan for visualization
-- Update README with new demo GIFs once re-rendered
+- Add test for SIM-013 abstention taxonomy (classify_abstain_reason)
+- Add test for SIM-014 cautious_bezier max_delta scaling
+- Consider: add test for max_detection_score in percept
 
-## Do not touch (from prior session)
+## Do not touch (from prior sessions)
 
 - Detection threshold + alpha in `FusionConfig` are tuned against the
-  baseline scenario
-- `LIGHT_DIR` and `AMBIENT` constants in `camera.py`
-- Clean `.ply` scan contents (no rain points in files)
+  baseline scenario (tests/test_fusion.py).
+- `LIGHT_DIR` and `AMBIENT` constants in `camera.py`.
+- Clean `.ply` scan contents — must not contain rain points (Decision 4).
+- The pre-SIM-011 controller callable signature `(t, state) -> (v, d)`
+  is preserved internally in `_make_base_controller`; external callers
+  should use the wrapped callable via `make_controller` and the new
+  3-arg form `(t, state, percept=...)`.

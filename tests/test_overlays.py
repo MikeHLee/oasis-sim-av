@@ -119,9 +119,11 @@ def test_compose_grid5x2():
     assert composed.shape[2] == 3
 
     total_w = 5 * 120
-    expected_h = 2 * (100 + 18) + 24
+    raw_h = 2 * (100 + 18) + 24
+    expected_h = ((raw_h + 15) // 16) * 16
     assert composed.shape[1] == total_w
     assert composed.shape[0] == expected_h
+    assert composed.shape[0] % 16 == 0, "Height must be divisible by 16 for macro-block alignment"
 
 
 def test_compose_grid5x2_wrong_count():

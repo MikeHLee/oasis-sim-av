@@ -239,7 +239,8 @@ def compose_grid5x2(
 ) -> np.ndarray:
     """Compose 10 panels into a 5×2 grid.
 
-    Returns a single (H, W, 3) uint8 image.
+    Returns a single (H, W, 3) uint8 image. Total height is padded to be
+    divisible by 16 to avoid imageio macro-block warnings.
 
     Layout:
         Row 0: panels[0] ... panels[4]
@@ -255,8 +256,11 @@ def compose_grid5x2(
     panel_h = max_h + title_height
     panel_w = max_w
 
-    total_h = 2 * panel_h + footer_height
+    raw_h = 2 * panel_h + footer_height
+    total_h = ((raw_h + 15) // 16) * 16
     total_w = 5 * panel_w
+
+    actual_footer_h = total_h - 2 * panel_h
 
     canvas = np.zeros((total_h, total_w, 3), dtype=np.uint8)
     canvas[:] = [15, 15, 18]
@@ -276,7 +280,7 @@ def compose_grid5x2(
 
     if footer_text:
         _draw_text_line(
-            canvas, 4, total_h - footer_height + 4, footer_text, total_w - 8
+            canvas, 4, total_h - actual_footer_h + 4, footer_text, total_w - 8
         )
 
     return canvas

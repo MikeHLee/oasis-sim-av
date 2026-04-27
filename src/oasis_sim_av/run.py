@@ -32,6 +32,7 @@ from .vehicle import KinematicBicycle, make_controller
 from .world import World
 from .bev import BEVRenderer
 from .detect import OracleDetector, OracleDetectorConfig
+from .fusion import ComplementaryFilter, FusionConfig, yellow_pixel_count
 from .rain import RainField
 
 
@@ -43,6 +44,8 @@ def run(cfg: ScenarioConfig, out_root: Path, log: bool = True) -> Path:
     (run_dir / "lidar").mkdir(parents=True, exist_ok=True)
     if cfg.bev is not None:
         (run_dir / "bev").mkdir(parents=True, exist_ok=True)
+    if cfg.rain_clutter is not None and cfg.rain_clutter.enabled:
+        (run_dir / "lidar_viz").mkdir(parents=True, exist_ok=True)
     cfg.to_yaml(run_dir / "config.yaml")
 
     rng = np.random.default_rng(cfg.seed)
@@ -68,6 +71,20 @@ def run(cfg: ScenarioConfig, out_root: Path, log: bool = True) -> Path:
             cfg.rain_clutter, world.ground_z, rng
         )
 
+    # SIM-011: in-loop fusion filter + active-learning abstention log.
+    # Running `p_fused` is passed into the controller so cautious-mode
+    # controllers can slow the vehicle when confidence is low. Frames
+    # below `abstain_p_threshold` are serialized to `abstain.jsonl`.
+    fusion_filter = ComplementaryFilter(FusionConfig())
+    percept: dict = {"p_fused": 0.0, "p_lidar": 0.0, "p_camera": 0.0}
+    last_percept: dict | None = None
+    last_sensor_t: float | None = None
+    abstain_path = run_dir / "abstain.jsonl"
+    abstain_file = (
+        open(abstain_path, "w") if cfg.output.save_jsonl else None
+    )
+    abstain_thresh = float(cfg.vehicle.controller.abstain_p_threshold)
+
     # Settle cloth under gravity for a moment so it sags naturally before t=0
     for _ in range(50):
         cloth.step(cfg.dt)
@@ -84,8 +101,8 @@ def run(cfg: ScenarioConfig, out_root: Path, log: bool = True) -> Path:
         for step_i in range(n_steps):
             t = step_i * cfg.dt
 
-            # Controller -> vehicle
-            v, delta = controller(t, vehicle.state)
+            # Controller -> vehicle (SIM-011: percept carries running p_fused)
+            v, delta = controller(t, vehicle.state, percept=percept)
             vehicle.step(v, delta, cfg.dt)
 
             # Cloth physics
@@ -163,6 +180,34 @@ def run(cfg: ScenarioConfig, out_root: Path, log: bool = True) -> Path:
 
                 if cfg.output.save_ply:
                     lidar.write_ply(scan, str(run_dir / "lidar" / f"{frame_idx:06d}.ply"))
+                    # Lossless sidecar so the grid5x2 renderer can colour by
+                    # kind (SIM-010). Clean scan — no rain points here.
+                    lidar.write_npz(
+                        str(run_dir / "lidar" / f"{frame_idx:06d}.npz"),
+                        points=scan.points,
+                        kind=scan.kind,
+                        ranges=scan.ranges,
+                        origin=scan.origin,
+                    )
+                    # Optional rain-augmented viz scan (kind=3 droplets).
+                    # Per memory.md Decision 4 this is visualization-only —
+                    # never fed to fusion, never written into .ply.
+                    if rain_field is not None:
+                        rain_xyz = rain_field.positions.astype(np.float32)
+                        rain_kind = np.full(rain_xyz.shape[0], 3, dtype=np.int8)
+                        rain_r = np.linalg.norm(
+                            rain_xyz - scan.origin.astype(np.float32), axis=1
+                        )
+                        viz_points = np.concatenate([scan.points, rain_xyz], axis=0)
+                        viz_kind = np.concatenate([scan.kind, rain_kind], axis=0)
+                        viz_ranges = np.concatenate([scan.ranges, rain_r], axis=0)
+                        lidar.write_npz(
+                            str(run_dir / "lidar_viz" / f"{frame_idx:06d}.npz"),
+                            points=viz_points,
+                            kind=viz_kind,
+                            ranges=viz_ranges,
+                            origin=scan.origin,
+                        )
                 if cfg.output.save_png:
                     _write_png(run_dir / "frames" / f"{frame_idx:06d}.png", img)
 
@@ -187,6 +232,75 @@ def run(cfg: ScenarioConfig, out_root: Path, log: bool = True) -> Path:
                     "n_ground_hits": int(np.sum(scan.kind == 0)),
                 }
                 record["frame_idx"] = frame_idx
+
+                # -----------------------------------------------------------
+                # SIM-011: in-loop fusion + active-learning abstention.
+                # Compute p_lidar from tape returns, p_camera from the
+                # rendered RGB, feed the running complementary filter. The
+                # updated posterior is written into `record["fusion"]` and
+                # stashed in `percept` for the NEXT step's controller call,
+                # so steering/velocity can react to low confidence.
+                # -----------------------------------------------------------
+                fcfg = fusion_filter.cfg
+                n_ret = int(np.sum(scan.kind == 2))
+                p_l = min(1.0, n_ret / max(1e-9, fcfg.lidar_peak))
+                n_yellow = yellow_pixel_count(img)
+                p_c = min(1.0, n_yellow / max(1e-9, fcfg.camera_peak))
+                dt_fuse = (
+                    (t - last_sensor_t)
+                    if last_sensor_t is not None
+                    else 1.0 / max(1.0, fcfg.alpha)
+                )
+                last_sensor_t = t
+                p_fused = fusion_filter.update(p_l, p_c, dt_fuse)
+                max_det_score = max((d.get("score", 0.0) for d in detections), default=0.0)
+                percept = {
+                    "p_fused": float(p_fused),
+                    "p_lidar": float(p_l),
+                    "p_camera": float(p_c),
+                    "n_detections": len(detections),
+                    "max_detection_score": float(max_det_score),
+                    "t": float(t),
+                    "frame_idx": frame_idx,
+                }
+                record["fusion"] = {
+                    "p_lidar": percept["p_lidar"],
+                    "p_camera": percept["p_camera"],
+                    "p_fused": percept["p_fused"],
+                    "detected": percept["p_fused"] >= fcfg.detect_threshold,
+                }
+
+                # SIM-013: Compute abstention reasons (taxonomy for downstream labeller).
+                abstain_reason = _classify_abstain_reason(
+                    percept,
+                    last_percept=last_percept,
+                    scan=scan,
+                    lidar_cfg=cfg.lidar,
+                    cloth_rms_velocity=np.sqrt(
+                        np.mean(np.sum(cloth.velocities.reshape(-1, 3) ** 2, axis=1))
+                    ),
+                    abstain_thresh=abstain_thresh,
+                )
+
+                if abstain_file is not None and abstain_reason is not None:
+                    abstain_file.write(
+                        json.dumps(
+                            {
+                                "frame_idx": frame_idx,
+                                "t": percept["t"],
+                                "p_fused": percept["p_fused"],
+                                "p_lidar": percept["p_lidar"],
+                                "p_camera": percept["p_camera"],
+                                "n_detections": percept["n_detections"],
+                                "vehicle": record["vehicle"],
+                                "reason": abstain_reason,
+                            }
+                        )
+                        + "\n"
+                    )
+                    abstain_file.flush()
+
+                last_percept = percept.copy()
                 frame_idx += 1
 
             if state_file is not None:
@@ -205,6 +319,8 @@ def run(cfg: ScenarioConfig, out_root: Path, log: bool = True) -> Path:
     finally:
         if state_file is not None:
             state_file.close()
+        if abstain_file is not None:
+            abstain_file.close()
 
     if log:
         dt_real = time.time() - t0
@@ -240,8 +356,65 @@ def _write_png(path: Path, img: np.ndarray) -> None:
         return
     except ImportError:
         pass
-    # Last resort: raw .npy sidecar
     np.save(path.with_suffix(".npy"), img)
+
+
+def _classify_abstain_reason(
+    percept: dict,
+    last_percept: dict | None,
+    scan,
+    lidar_cfg,
+    cloth_rms_velocity: float,
+    abstain_thresh: float,
+) -> str | None:
+    """SIM-013: Classify why this frame should be abstained.
+
+    Returns one of the abstention reason strings, or None if the frame
+    should not be abstained. Reasons are checked in priority order:
+
+    1. cloth_velocity_excessive - tape RMS velocity > 3 m/s (motion-blur threshold)
+    2. lidar_dropout_rate_high - dropout rate exceeds 2x configured baseline
+    3. n_detections_flicker - detector dropped the box vs prior frame
+    4. p_fused_below_threshold - catch-all low confidence
+
+    Parameters
+    ----------
+    percept : dict
+        Current frame percept (p_fused, n_detections, etc.)
+    last_percept : dict | None
+        Prior frame percept for flicker detection (None on first frame)
+    scan : LiDARScan
+        Current LiDAR scan (for dropout rate calculation)
+    lidar_cfg : LiDARConfig
+        LiDAR configuration (for baseline dropout probability)
+    cloth_rms_velocity : float
+        RMS velocity of cloth particles in m/s
+    abstain_thresh : float
+        Threshold below which p_fused triggers abstention
+    """
+    p_fused = percept.get("p_fused", 1.0)
+    if p_fused >= abstain_thresh:
+        return None
+
+    cloth_velocity_threshold = 3.0
+    if cloth_rms_velocity > cloth_velocity_threshold:
+        return "cloth_velocity_excessive"
+
+    if scan is not None:
+        n_rays = scan.n_rays
+        n_returns = scan.points.shape[0]
+        dropout_rate = 1.0 - (n_returns / max(1, n_rays))
+        baseline_dropout = lidar_cfg.rain_dropout_prob if lidar_cfg else 0.0
+        if dropout_rate > 2.0 * baseline_dropout + 0.1:
+            return "lidar_dropout_rate_high"
+
+    n_det = percept.get("n_detections", 0)
+    if last_percept is not None:
+        n_det_prev = last_percept.get("n_detections", 0)
+        if n_det == 0 and n_det_prev > 0:
+            return "n_detections_flicker"
+
+    return "p_fused_below_threshold"
 
 
 # ---------------------------------------------------------------------------

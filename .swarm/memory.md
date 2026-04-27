@@ -2,6 +2,131 @@
 
 Append-only record of non-obvious decisions. Newest first.
 
+## 2026-04-27 — SIM-012/013/014 cautious demo, abstention taxonomy, percept-aware bezier
+
+### Decision 8 — EKF/UKF on p_fused deferred to SIM-v2
+Per CONTEXT.md out-of-scope clause, the ComplementaryFilter in `fusion.py`
+remains a first-order low-pass over weighted-sum measurements. A proper
+Bayesian filter (EKF/UKF) with explicit process + measurement noise would
+yield calibrated uncertainty (not just a smoothed point estimate), which
+in turn would make `abstain_p_threshold` scenario-invariant rather than
+hand-tuned. Flagged for SIM-v2 milestone; not urgent for MVP demo.
+
+The current filter is sufficient to demonstrate the safety behaviour
+(cautious slowdown) and provide an active-learning queue. Revisit when
+a downstream user reports tuning pain across disparate scenarios.
+
+### Decision 9 — Abstention reason taxonomy for downstream labeller
+SIM-013 expanded abstain.jsonl entries from a single reason to a prioritized
+taxonomy:
+  1. `cloth_velocity_excessive` — tape RMS velocity > 3 m/s (motion-blur)
+  2. `lidar_dropout_rate_high` — per-scan dropout > 2x baseline + 0.1
+  3. `n_detections_flicker` — detector dropped box vs prior frame
+  4. `p_fused_below_threshold` — catch-all low confidence
+
+This lets a downstream human/ML labeller stratify frames by failure mode
+rather than treating all abstentions uniformly.
+
+### Decision 10 — max_detection_score in percept dict
+SIM-018 added `max_detection_score` to the percept dict per-frame. This
+enables controllers or downstream analysis to distinguish "oracle detector
+sees tape (high score) but fusion disagrees" from "detector itself is
+uncertain". Useful for scenarios investigating detector-fusion disagreement.
+
+### Decision 11 — Percept-aware bezier_pursuit tightens max_delta
+SIM-014 introduced `_wrap_cautious_bezier` which, in addition to velocity
+scaling, tightens max_delta at low p_fused (delta_scale = 0.6 + 0.4 *
+p/p_thresh). Rationale: uncertain vehicle should not make aggressive
+steering corrections. Lookahead extension was considered but rejected as
+it would require refactoring the 2-arg base controller closure.
+
+## 2026-04-27 — SIM-010 grid panel wiring + lossless scan sidecars
+
+The grid5x2 panels 3, 4, 8, 9 that landed in SIM-007 were placeholder
+stubs. Wiring them up surfaced two decisions worth recording.
+
+### Decision 1 — `.npz` sidecar alongside `.ply`
+The `.ply` writer in `lidar.py` colour-encodes `kind` via a 3-entry LUT
+(ground/building/tape). Adding kind=3 rain points would require either
+(a) extending the LUT with a fourth colour that must not clash with
+degraded Lambert shades of kind=2 tape, or (b) reversing colour →kind
+by looking up the exact uint8 triple, which breaks the moment a writer
+dithers or a reader antialiases.
+
+Decision: keep `.ply` as the "published" external format (colour is its
+only semantic surface), and add `lidar/NNNNNN.npz` as an internal
+lossless sidecar with `points / kind / ranges / origin`. The grid
+renderer reads the `.npz`. Tests continue to inspect `.ply`.
+
+### Decision 2 — `lidar_viz/` for rain-augmented viz scans
+Per 2026-04-26 Decision 4, `scan_with_clutter` should exist but "never
+be persisted". That made the renderer unable to see rain droplets,
+forcing a choice between re-advecting the rain field in the renderer
+(requires preserved seed + step count — fragile) or persisting the viz
+scan.
+
+Decision: persist to `runs/<stamp>/lidar_viz/NNNNNN.npz` only when
+`cfg.rain_clutter.enabled`. The renderer prefers this path and falls
+back to `lidar/NNNNNN.npz` when absent. Clean `.ply` remains untouched
+(Decision 4 intent: fusion + tests see rain-free scans). Test
+`test_grid5x2_with_rain_clutter_writes_viz_scan` guards the invariant
+that the cyan rain RGB `0 200 220` never appears in the clean `.ply`.
+
+### Decision 3 — panel 3 reprojection respects rendered PNG resolution
+`CameraConfig.width/height` is what the camera eye-tracer renders at,
+but the PNG on disk may have been downsampled or the grid may be
+assembled from multiple resolutions. `_overlay_lidar_on_camera`
+rescales `(u, v)` into the actual PNG pixel grid rather than the
+configured camera grid, so reprojected dots align with the photo even
+when resolutions diverge (matters for small test fixtures at
+48×32).
+
+## 2026-04-27 — SIM-011 in-loop fusion + cautious controller
+
+### Decision 4 — Controller signature stays backward-compatible
+Existing factories return `(t, state) -> (v, delta)`. Breaking that to
+accept `percept` everywhere would cascade into every test and every
+downstream script. Instead: `make_controller` now wraps the base
+closure with either `_wrap_percept_passthrough` (default — accepts &
+ignores percept) or `_wrap_cautious` (reads `percept["p_fused"]`). The
+`Controller` Protocol gained an optional `percept=None` kwarg.
+
+Tradeoff: the `_make_base_controller` internal factory is still 2-arg;
+you cannot write a custom controller type that reads percept without
+editing `_wrap_cautious`. Acceptable because all current "smart"
+perception-aware behaviour is velocity-scaling, which the wrapper
+handles uniformly.
+
+### Decision 5 — Cautious mode only modulates `v`, never `delta`
+Scaling steering by confidence is tempting but wrong: a less-confident
+vehicle should not steer less precisely, it should slow down and
+re-observe. Slowing is monotone safety; de-steering could put the car
+into a corner it wasn't meant to enter. `_wrap_cautious` returns the
+base controller's `delta` unchanged.
+
+### Decision 6 — Percept defaults to `p_fused=0.0` before first sensor fire
+Initial percept sets `p_fused=0.0` so step 0 under cautious mode
+produces `v = min_v_frac * base_v`. This means cautious vehicles
+"creep forward" at startup until the first sensor fire confirms the
+world matches expectations. Observable in the baseline run as
+`t=0.00 v=2.00` (min_v_frac=0.2, base_v=10) followed by `t=0.10
+v=10.00` after first fusion update.
+
+Alternative considered: initialise `percept["p_fused"] = 1.0` so the
+vehicle launches at full speed and only slows if later sensors
+disagree. Rejected — optimistic priors violate the safety intent of
+cautious mode. If a scenario wants this, it can set
+`cautious_min_v_frac = 1.0` which turns the wrapper into a no-op.
+
+### Decision 7 — Abstention log is append-only JSONL, always exists
+`abstain.jsonl` is created as an empty file even when no frames
+abstain. This makes downstream tooling (`if path.exists()`) trivial and
+matches the semantics of `state.jsonl`. Entries carry the minimal
+context a reviewer/labeler would need: `frame_idx`, `t`, full
+`p_*` breakdown, detection count, vehicle pose, and a `reason` string
+(currently always `"p_fused_below_threshold"`; reserved for future
+abstention reasons like "n_detections_flicker" or "lidar_dropout_rate_high").
+
 ## 2026-04-26 — SIM-007/008/009 multi-view demo spec (frozen, not yet implemented)
 
 User requested that the existing single-panel demo GIFs be replaced

@@ -142,6 +142,32 @@ class SimulatedLiDAR:
         )
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def write_npz(
+        path: str,
+        points: np.ndarray,
+        kind: np.ndarray,
+        ranges: np.ndarray | None = None,
+        origin: np.ndarray | None = None,
+    ) -> None:
+        """Persist scan arrays to a compressed .npz sidecar.
+
+        Used by the multi-view renderer, which needs lossless access to the
+        per-point ``kind`` field (the ASCII .ply writer below reserves colour,
+        not kind, so reverse-mapping is lossy once rain points at kind=3 are
+        added — their colour can clash with degraded-yellow tape returns).
+        """
+        payload: dict[str, np.ndarray] = {
+            "points": np.asarray(points, dtype=np.float32),
+            "kind": np.asarray(kind, dtype=np.int8),
+        }
+        if ranges is not None:
+            payload["ranges"] = np.asarray(ranges, dtype=np.float32)
+        if origin is not None:
+            payload["origin"] = np.asarray(origin, dtype=np.float32)
+        np.savez_compressed(path, **payload)
+
+    # ------------------------------------------------------------------
     def write_ply(self, scan: LiDARScan, path: str) -> None:
         """Write an ASCII .ply file.  Colour-encodes ``kind``."""
         color_lut = np.array(

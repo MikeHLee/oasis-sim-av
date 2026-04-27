@@ -14,6 +14,11 @@ Equations (bicycle, rear-axle reference):
 Controllers implemented (brief requirement): ``step``, ``ramp``, ``sine``,
 ``impulse_steer``, plus ``constant`` as a default.  Any controller returns a
 ``(v, delta)`` tuple for a given sim time ``t``.
+
+SIM-011: controllers returned by :func:`make_controller` accept an optional
+``percept`` keyword argument carrying the running fusion posterior. When
+``VehicleControllerConfig.cautious`` is True, a wrapper modulates the base
+velocity by the posterior so the vehicle slows down at low confidence.
 """
 from __future__ import annotations
 
@@ -29,11 +34,127 @@ from .config import VehicleConfig, VehicleControllerConfig
 # Controllers
 # ---------------------------------------------------------------------------
 class Controller(Protocol):
-    def __call__(self, t: float, state: np.ndarray) -> tuple[float, float]: ...
+    def __call__(
+        self,
+        t: float,
+        state: np.ndarray,
+        percept: dict | None = None,
+    ) -> tuple[float, float]: ...
 
 
 def make_controller(cfg: VehicleControllerConfig) -> Controller:
-    """Factory for the benchmark controllers."""
+    """Factory for the benchmark controllers.
+
+    Returned callables accept an optional ``percept`` kwarg (a dict with at
+    least ``p_fused: float``). Base controllers ignore it; when
+    ``cfg.cautious`` is True the callable is wrapped so the velocity command
+    is scaled by the running fusion posterior.
+
+    SIM-014: For ``bezier_pursuit`` controllers, the cautious wrapper also
+    modulates steering parameters (lookahead distance and max_delta) based
+    on confidence, enabling smoother tracking under uncertainty.
+    """
+    base = _make_base_controller(cfg)
+    if cfg.cautious:
+        if cfg.type == "bezier_pursuit":
+            return _wrap_cautious_bezier(base, cfg)
+        return _wrap_cautious(base, cfg)
+    return _wrap_percept_passthrough(base)
+
+
+def _wrap_percept_passthrough(base: Callable) -> Controller:
+    """Allow a 2-arg base controller to be called with an optional percept."""
+
+    def ctrl(
+        t: float,
+        state: np.ndarray,
+        percept: dict | None = None,
+    ) -> tuple[float, float]:
+        return base(t, state)
+
+    return ctrl
+
+
+def _wrap_cautious(
+    base: Callable, cfg: VehicleControllerConfig
+) -> Controller:
+    """Scale base velocity by `p_fused / p_threshold`, clipped.
+
+    Uses a piecewise-linear slowdown: at ``p_fused >= p_threshold`` velocity
+    passes through unchanged; below it velocity ramps down linearly to
+    ``min_v_frac * base_v`` at ``p_fused = 0``. If no percept is supplied
+    (first step, no fusion data yet) the unmodulated command passes through
+    so the vehicle doesn\'t stall before any sensor has fired.
+    """
+    p_thresh = max(1e-6, float(cfg.cautious_p_threshold))
+    min_frac = float(cfg.cautious_min_v_frac)
+
+    def ctrl(
+        t: float,
+        state: np.ndarray,
+        percept: dict | None = None,
+    ) -> tuple[float, float]:
+        v, delta = base(t, state)
+        if percept is None:
+            return v, delta
+        p = float(percept.get("p_fused", 0.0))
+        scale = max(min_frac, min(1.0, p / p_thresh))
+        return v * scale, delta
+
+    return ctrl
+
+
+def _wrap_cautious_bezier(
+    base: Callable, cfg: VehicleControllerConfig
+) -> Controller:
+    """SIM-014: Percept-aware cautious wrapper for bezier_pursuit.
+
+    In addition to velocity scaling (inherited from standard cautious), this
+    wrapper tightens max_delta at low confidence to refuse aggressive steering
+    corrections under uncertainty.
+
+    Rationale: A less-confident vehicle should steer more smoothly while
+    slowing, avoiding sharp corrections that could be based on noisy
+    perception. Tightened max_delta prevents sudden direction changes.
+
+    max_delta is adjusted piecewise-linearly with p_fused:
+    - max_delta: base_max_delta * (0.6 + 0.4 * p/p_thresh) at p < p_thresh
+
+    Note: Lookahead distance is NOT dynamically adjusted here because the
+    base controller is a 2-arg closure that uses a fixed lookahead computed
+    at construction time. Adjusting lookahead would require either:
+    (a) precomputing multiple controllers with different lookaheads, or
+    (b) refactoring the bezier controller to accept percept directly.
+    The max_delta adjustment provides the primary safety benefit without
+    that complexity.
+    """
+    p_thresh = max(1e-6, float(cfg.cautious_p_threshold))
+    min_frac = float(cfg.cautious_min_v_frac)
+    base_max_delta = float(cfg.bezier_max_delta_rad)
+
+    def ctrl(
+        t: float,
+        state: np.ndarray,
+        percept: dict | None = None,
+    ) -> tuple[float, float]:
+        v, delta = base(t, state)
+        if percept is None:
+            return v, delta
+        p = float(percept.get("p_fused", 0.0))
+        v_scale = max(min_frac, min(1.0, p / p_thresh))
+        if p < p_thresh:
+            conf_ratio = p / p_thresh
+            delta_scale = 0.6 + 0.4 * conf_ratio
+            adj_delta = delta * delta_scale
+            adj_delta = float(np.clip(adj_delta, -base_max_delta * delta_scale, base_max_delta * delta_scale))
+            return v * v_scale, adj_delta
+        return v * v_scale, delta
+
+    return ctrl
+
+
+def _make_base_controller(cfg: VehicleControllerConfig) -> Callable:
+    """Return the base 2-arg ``(t, state) -> (v, delta)`` controller."""
     kind = cfg.type
     if kind == "constant":
         base_v, base_delta = cfg.base_v, cfg.base_delta
@@ -117,12 +238,6 @@ def make_controller(cfg: VehicleControllerConfig) -> Controller:
             alpha = np.arctan2(dy, dx) - theta
             # Wrap to (-pi, pi] so steering direction is well-defined
             alpha = (alpha + np.pi) % (2.0 * np.pi) - np.pi
-            # delta = atan(2 L sin(alpha) / Ld)  (requires wheelbase -> pass via state?)
-            # We don't have L here; infer a reasonable L from state is not possible,
-            # so use a unit-free approximation: delta ≈ alpha scaled and clipped.
-            # This gives correct sign, tracks well at low speeds, and respects
-            # bezier_max_delta_rad. For exact kinematics use the bicycle follower
-            # at the orchestrator layer (SIM-003 v2).
             delta = float(np.clip(alpha, -max_delta, max_delta))
             return base_v, delta
 

@@ -351,7 +351,24 @@ def render_video_grid5x2(
     fps: int = 10,
     save_frames: bool = False,
 ) -> Path:
-    """Stitch frames into a 5×2 multi-view grid video."""
+    """Stitch frames into a 5×2 multi-view grid video.
+
+    Layout:
+        TOP ROW (vehicle-camera perspective):
+            1. Camera RGB (raw forward view)
+            2. Camera + 2D bboxes (oracle detector)
+            3. Camera + reprojected LiDAR points (kind-coloured)
+            4. Fused: camera + bboxes + reprojected LiDAR
+            5. Fusion posterior strip chart
+
+        BOTTOM ROW (world-fixed BEV perspective):
+            6. BEV ground truth
+            7. BEV + vehicle trail
+            8. LiDAR BEV, coloured by kind (0=ground, 1=building,
+               2=tape, 3=rain-cyan)
+            9. Fused BEV: ground truth overlaid with LiDAR points
+            10. HUD / footer legend
+    """
     run_dir = Path(run_dir)
     state = load_state(run_dir)
     frame_rows = frame_records(state)
@@ -360,6 +377,8 @@ def render_video_grid5x2(
 
     frames_dir = run_dir / "frames"
     bev_dir = run_dir / "bev"
+    lidar_dir = run_dir / "lidar"
+    lidar_viz_dir = run_dir / "lidar_viz"
     if not frames_dir.exists():
         raise FileNotFoundError(f"{frames_dir} not found")
 
@@ -368,6 +387,7 @@ def render_video_grid5x2(
 
     frame_rows.sort(key=lambda r: int(r["frame_idx"]))
     p_fused_series: list[float] = []
+    fusion_lines = _load_fusion_lines(run_dir)
 
     try:
         import imageio.v3 as iio
@@ -383,78 +403,107 @@ def render_video_grid5x2(
     vehicle_trail: list[tuple[float, float]] = []
 
     for i, rec in enumerate(frame_rows):
-        png_path = frames_dir / f"{int(rec['frame_idx']):06d}.png"
+        frame_idx = int(rec["frame_idx"])
+        png_path = frames_dir / f"{frame_idx:06d}.png"
         if not png_path.exists():
             continue
 
-        if reader is None:
-            try:
-                from matplotlib.image import imread as mpl_imread
-                img = (mpl_imread(str(png_path))[..., :3] * 255).astype(np.uint8)
-            except ImportError:
-                raise RuntimeError("Need imageio or matplotlib") from None
-        else:
-            img = reader(str(png_path))
-            if img.ndim == 2:
-                img = np.stack([img] * 3, axis=-1)
-            img = img[..., :3].astype(np.uint8)
-
+        img = _read_png(png_path, reader)
         H, W = img.shape[:2]
 
-        panel1 = img.copy()
         detections = rec.get("detections", [])
+
+        # ------------------------------------------------------------
+        # Load LiDAR scan for this frame (prefer rain-augmented viz scan
+        # when present, per memory.md Decision 4).
+        # ------------------------------------------------------------
+        scan_path = lidar_viz_dir / f"{frame_idx:06d}.npz"
+        if not scan_path.exists():
+            scan_path = lidar_dir / f"{frame_idx:06d}.npz"
+        scan = _load_scan_npz(scan_path) if scan_path.exists() else None
+
+        # ------------------------------------------------------------
+        # Vehicle pose at this frame (for camera reprojection).
+        # ------------------------------------------------------------
+        veh = rec.get("vehicle", {})
+        x, y, theta = veh.get("x", 0.0), veh.get("y", 0.0), veh.get("theta", 0.0)
+        veh_origin = np.array([x, y, 0.0], dtype=np.float64)
+        c, s = float(np.cos(theta)), float(np.sin(theta))
+        veh_R = np.array(
+            [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64
+        )
+
+        # ------------------------------------------------------------
+        # Panels 1, 2: camera raw + camera with bboxes.
+        # ------------------------------------------------------------
+        panel1 = img.copy()
         panel2 = draw_bboxes(panel1, detections) if detections else panel1.copy()
 
-        panel3 = img.copy()
-        panel4 = img.copy()
+        # ------------------------------------------------------------
+        # Panel 3: camera + reprojected LiDAR points (coloured by kind).
+        # Panel 4: fused = panel 3 + oracle bboxes.
+        # ------------------------------------------------------------
+        panel3 = _overlay_lidar_on_camera(img, scan, cfg, veh_origin, veh_R)
+        panel4 = draw_bboxes(panel3, detections) if detections else panel3.copy()
 
-        fusion_jsonl = run_dir / "fusion.jsonl"
-        if fusion_jsonl.exists() and len(p_fused_series) <= i:
-            with open(fusion_jsonl) as f:
-                lines = f.readlines()
-            if i < len(lines):
-                import json as json_mod
-                p_fused_series.append(
-                    json_mod.loads(lines[i])["p_fused"]
-                )
-
+        # ------------------------------------------------------------
+        # Panel 5: running fusion posterior strip.
+        # ------------------------------------------------------------
+        if i < len(fusion_lines):
+            p_fused_series.append(fusion_lines[i])
         panel5 = draw_fusion_strip(p_fused_series[: i + 1], W, H)
 
         panels: list[np.ndarray] = [panel1, panel2, panel3, panel4, panel5]
 
+        # ------------------------------------------------------------
+        # Bottom row: BEV perspective.
+        # ------------------------------------------------------------
         if has_bev:
-            bev_png = bev_dir / f"{int(rec['frame_idx']):06d}.png"
-            if bev_png.exists():
-                if reader is None:
-                    from matplotlib.image import imread as mpl_imread
-                    bev_img = (mpl_imread(str(bev_png))[..., :3] * 255).astype(np.uint8)
-                else:
-                    bev_img = reader(str(bev_png))
-                    if bev_img.ndim == 2:
-                        bev_img = np.stack([bev_img] * 3, axis=-1)
-                    bev_img = bev_img[..., :3].astype(np.uint8)
-                panel6 = bev_img
-            else:
-                panel6 = np.zeros((H, W, 3), dtype=np.uint8)
+            bev_png = bev_dir / f"{frame_idx:06d}.png"
+            panel6 = (
+                _read_png(bev_png, reader)
+                if bev_png.exists()
+                else np.zeros((cfg.bev.size_px, cfg.bev.size_px, 3), dtype=np.uint8)
+            )
 
-            veh = rec.get("vehicle", {})
-            vehicle_trail.append((veh.get("x", 0.0), veh.get("y", 0.0)))
-
+            vehicle_trail.append((x, y))
             panel7 = _draw_trail_on_bev(panel6, vehicle_trail, cfg)
 
-            lidar = rec.get("lidar", {})
-            panel8 = np.zeros((H, W, 3), dtype=np.uint8) + 30
+            # Panel 8: LiDAR points on a dedicated BEV canvas.
+            if scan is not None:
+                panel8 = rasterise_lidar_bev(
+                    scan["points"],
+                    scan["kind"],
+                    np.asarray(cfg.bev.center, dtype=np.float64),
+                    float(cfg.bev.extent_m),
+                    int(cfg.bev.size_px),
+                    ranges=scan.get("ranges"),
+                )
+            else:
+                panel8 = np.zeros_like(panel6)
 
-            panel9 = panel7.copy()
+            # Panel 9: fused BEV = GT + LiDAR overlay (non-zero pixels win).
+            panel9 = _overlay_lidar_bev_on_truth(panel6, panel8)
         else:
-            panel6 = panel7 = panel8 = panel9 = np.zeros((H, W, 3), dtype=np.uint8)
+            zero = np.zeros((H, W, 3), dtype=np.uint8)
+            panel6 = panel7 = panel8 = panel9 = zero
 
-        t = float(rec.get("t", 0.0))
-        veh = rec.get("vehicle", {})
+        # ------------------------------------------------------------
+        # Panel 10: HUD footer.
+        # ------------------------------------------------------------
+        t_sim = float(rec.get("t", 0.0))
         speed = veh.get("v", 0.0)
         n_boxes = len(detections)
         p_current = p_fused_series[-1] if p_fused_series else 0.0
-        footer = f"t={t:.2f}s  v={speed:.1f}m/s  det={n_boxes}  p_fused={p_current:.2f}"
+        footer = (
+            f"t={t_sim:.2f}s  v={speed:.1f}m/s  det={n_boxes}  "
+            f"p_fused={p_current:.2f}"
+        )
+        panel10 = np.zeros(panel6.shape, dtype=np.uint8)
+        panel10[:] = [20, 20, 25]
+        _draw_hud_text(panel10, footer)
+
+        panels.extend([panel6, panel7, panel8, panel9, panel10])
 
         titles = [
             "Camera RGB",
@@ -468,12 +517,6 @@ def render_video_grid5x2(
             "Fused BEV",
             "HUD",
         ]
-
-        panel10 = np.zeros((H, W, 3), dtype=np.uint8)
-        panel10[:] = [20, 20, 25]
-        _draw_hud_text(panel10, footer)
-
-        panels.extend([panel6, panel7, panel8, panel9, panel10])
 
         composed = compose_grid5x2(panels, titles=titles, footer_text=footer)
         out_frames.append(composed)
@@ -500,6 +543,129 @@ def render_video_grid5x2(
         except ImportError:
             np.save(overlay_dir / f"{i:06d}.npy", f)
     return overlay_dir
+
+
+# ---------------------------------------------------------------------------
+# Grid5x2 helpers
+# ---------------------------------------------------------------------------
+def _read_png(path: Path, reader) -> np.ndarray:
+    """Load a PNG into a (H, W, 3) uint8 array."""
+    if reader is None:
+        from matplotlib.image import imread as mpl_imread  # type: ignore
+        img = (mpl_imread(str(path))[..., :3] * 255).astype(np.uint8)
+    else:
+        img = reader(str(path))
+        if img.ndim == 2:
+            img = np.stack([img] * 3, axis=-1)
+        img = img[..., :3].astype(np.uint8)
+    return img
+
+
+def _load_scan_npz(path: Path) -> dict[str, np.ndarray] | None:
+    """Load a LiDAR scan sidecar (points, kind, [ranges, origin])."""
+    if not path.exists():
+        return None
+    data = np.load(path)
+    out: dict[str, np.ndarray] = {
+        "points": np.asarray(data["points"], dtype=np.float64),
+        "kind": np.asarray(data["kind"], dtype=np.int8),
+    }
+    if "ranges" in data.files:
+        out["ranges"] = np.asarray(data["ranges"], dtype=np.float64)
+    if "origin" in data.files:
+        out["origin"] = np.asarray(data["origin"], dtype=np.float64)
+    return out
+
+
+def _load_fusion_lines(run_dir: Path) -> list[float]:
+    """Pre-parse fusion.jsonl into a list of p_fused values, if present."""
+    path = run_dir / "fusion.jsonl"
+    if not path.exists():
+        return []
+    import json as json_mod
+    out: list[float] = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            out.append(float(json_mod.loads(line).get("p_fused", 0.0)))
+    return out
+
+
+def _overlay_lidar_on_camera(
+    img: np.ndarray,
+    scan: dict[str, np.ndarray] | None,
+    cfg,
+    veh_origin: np.ndarray,
+    veh_R: np.ndarray,
+    point_radius: int = 1,
+) -> np.ndarray:
+    """Project LiDAR scan points into the camera image, colour by kind."""
+    out = img.copy()
+    if scan is None or cfg is None or scan["points"].shape[0] == 0:
+        return out
+
+    from .overlays import KIND_COLORS
+
+    H, W = out.shape[:2]
+    cam = cfg.camera
+    u, v, mask = reproject_points_to_camera(
+        scan["points"],
+        np.asarray(cam.offset, dtype=np.float64),
+        np.asarray(cam.forward, dtype=np.float64),
+        np.asarray(cam.up, dtype=np.float64),
+        float(cam.fov_h_deg),
+        int(cam.width),
+        int(cam.height),
+        veh_origin,
+        veh_R,
+    )
+    # Image width may differ from the configured camera width if the
+    # rendered PNG is at a different resolution. Rescale into the PNG
+    # pixel grid so reprojection stays correct.
+    if W != int(cam.width) or H != int(cam.height):
+        u = (u.astype(np.float64) * W / max(1, int(cam.width))).astype(np.int32)
+        v = (v.astype(np.float64) * H / max(1, int(cam.height))).astype(np.int32)
+        mask = mask & (u >= 0) & (u < W) & (v >= 0) & (v < H)
+
+    idx = np.where(mask)[0]
+    if idx.size == 0:
+        return out
+
+    kinds = scan["kind"]
+    # Stamp a small square per point so the dots read at a glance.
+    for k in idx:
+        col = KIND_COLORS.get(int(kinds[k]), np.array([200, 200, 200], dtype=np.uint8))
+        uu, vv = int(u[k]), int(v[k])
+        y0 = max(0, vv - point_radius)
+        y1 = min(H, vv + point_radius + 1)
+        x0 = max(0, uu - point_radius)
+        x1 = min(W, uu + point_radius + 1)
+        out[y0:y1, x0:x1] = col
+    return out
+
+
+def _overlay_lidar_bev_on_truth(
+    truth_bev: np.ndarray, lidar_bev: np.ndarray
+) -> np.ndarray:
+    """Composite non-zero LiDAR BEV pixels onto the ground-truth BEV.
+
+    Both images must have the same (H, W, 3) shape. LiDAR pixels with any
+    non-zero channel overwrite the truth pixel; empty LiDAR cells pass
+    through so the ground-truth scene reads underneath.
+    """
+    if truth_bev.shape != lidar_bev.shape:
+        # Resize lidar_bev to match truth via nearest-neighbour if needed.
+        th, tw = truth_bev.shape[:2]
+        lh, lw = lidar_bev.shape[:2]
+        ys = (np.arange(th) * lh / max(1, th)).astype(np.int32)
+        xs = (np.arange(tw) * lw / max(1, tw)).astype(np.int32)
+        lidar_bev = lidar_bev[ys[:, None], xs[None, :]]
+    mask = lidar_bev.sum(axis=-1) > 0
+    out = truth_bev.copy()
+    out[mask] = lidar_bev[mask]
+    return out
 
 
 def _load_config(run_dir: Path):
